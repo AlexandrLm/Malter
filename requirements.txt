@@ -1,0 +1,9 @@
+aiogram
+python-dotenv
+google-genai
+sqlalchemy
+aiosqlite
+asyncpg
+fastapi
+uvicorn[standard]
+httpx
