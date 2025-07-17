@@ -1,8 +1,8 @@
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from config import DATABASE_URL
-from server.models import Base, UserProfile
+from server.models import Base, UserProfile, LongTermMemory
 
 # Создаем асинхронный "движок" и фабрику сессий
 async_engine = create_async_engine(DATABASE_URL)
@@ -40,3 +40,20 @@ async def delete_profile(user_id: int):
     async with async_session_factory() as session:
         await session.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
         await session.commit()
+
+async def save_long_term_memory(user_id: int, fact: str, category: str):
+    async with async_session_factory() as session:
+        memory = LongTermMemory(user_id=user_id, fact=fact, category=category)
+        session.add(memory)
+        await session.commit()
+        return {"status": "success", "fact_saved": fact}
+
+async def get_long_term_memories(user_id: int, limit: int = 20) -> list[LongTermMemory]:
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(LongTermMemory)
+            .where(LongTermMemory.user_id == user_id)
+            .order_by(desc(LongTermMemory.timestamp))
+            .limit(limit)
+        )
+        return result.scalars().all()

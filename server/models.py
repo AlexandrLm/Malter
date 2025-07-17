@@ -1,5 +1,6 @@
 from sqlalchemy import BigInteger
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import func
 
 # Базовый класс для наших моделей
 class Base(DeclarativeBase):
@@ -23,3 +24,13 @@ class UserProfile(Base):
             "hobby": self.hobby,
             "place": self.place,
         }
+    
+class LongTermMemory(Base):
+    __tablename__ = "long_term_memories"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    fact: Mapped[str] = mapped_column(nullable=False)
+    # Категория поможет в будущем фильтровать воспоминания
+    category: Mapped[str] = mapped_column(nullable=True) 
+    timestamp: Mapped[str] = mapped_column(server_default=func.now()) # sqlalchemy.sql.func

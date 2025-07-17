@@ -105,8 +105,16 @@ async def handle_message(message: types.Message, state: FSMContext):
             for i, part in enumerate(parts):
                 part = part.strip()
                 if not part: continue
+                
+                # Перед отправкой имитируем набор текста
+                if i > 0: # Не делаем задержку перед самым первым сообщением
+                    # Динамическая задержка: ~20 символов в секунду + небольшая случайность
+                    delay = len(part) / 20 + (0.5 * (i % 2)) # Добавляем 0.5с к каждой второй паузе для ритма
+                    delay = max(1.0, min(delay, 4.0)) # Ограничиваем задержку от 1 до 4 секунд
+                    await asyncio.sleep(delay)
+
+                await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+                await asyncio.sleep(0.5) # Короткая пауза после "печатает..."
                 await message.answer(part)
-                if i < len(parts) - 1:
-                    await asyncio.sleep(1.2)
     else:
         await message.answer("Что-то телефон глючит, не могу нормально напечатать. Попробуй еще раз, пожалуйста.")
