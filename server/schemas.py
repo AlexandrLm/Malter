@@ -4,6 +4,7 @@ from datetime import datetime
 class ChatRequest(BaseModel):
     user_id: int
     message: str
+    timestamp: datetime
 
 
 class ChatResponse(BaseModel):
@@ -15,6 +16,7 @@ class ProfileData(BaseModel):
     occupation: str
     hobby: str
     place: str
+    timezone: str | None = None
 
 class ProfileUpdate(BaseModel):
     user_id: int

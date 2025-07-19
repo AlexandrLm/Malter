@@ -37,7 +37,7 @@ async def read_root():
 @app.post("/chat", response_model=ChatResponse)
 async def chat_handler(request: ChatRequest):
     try:
-        response_text = await generate_ai_response(request.user_id, request.message)
+        response_text = await generate_ai_response(request.user_id, request.message, request.timestamp)
         
         voice_message_data = None
         if response_text.startswith('[VOICE]'):

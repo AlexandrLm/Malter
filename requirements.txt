@@ -7,3 +7,6 @@ asyncpg
 fastapi
 uvicorn[standard]
 httpx
+timezonefinder
+pytz
+geopy

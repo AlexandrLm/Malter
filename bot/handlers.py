@@ -6,11 +6,15 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ChatAction
+from timezonefinder import TimezoneFinder
+from geopy.geocoders import Nominatim
 
 # Импортируем URL из конфига, а не хардкодим
 from config import API_BASE_URL
 
 router = Router()
+tf = TimezoneFinder()
+geolocator = Nominatim(user_agent="MashaGPT")
 
 # --- FSM для анкеты ---
 
@@ -33,6 +37,10 @@ ONBOARDING_STEPS = {
     },
     'place': {
         'question': "Дааа... точно. А было у нас какое-то особенное место в городе?",
+        'next_step': 'city',
+    },
+    'city': {
+        'question': "И последний вопрос, чтобы я не путалась во времени... В каком городе ты живешь?",
         'next_step': None, # Последний шаг
     }
 }
@@ -71,7 +79,7 @@ async def command_start(message: types.Message, state: FSMContext, client: httpx
             first_step_key = 'name'
             await message.answer(ONBOARDING_STEPS[first_step_key]['question'])
             await state.set_state(ProfileStates.onboarding)
-            await state.update_data(step='occupation') # Сохраняем следующий шаг
+            await state.update_data(current_question=first_step_key) # Сохраняем текущий шаг
     except httpx.RequestError as e:
         logging.error(f"API connection error in /start for user {user_id}: {e}")
         await message.answer("Ой, у меня что-то с интернетом... Не могу проверить, знакомы ли мы. Попробуй чуть позже.")
@@ -89,7 +97,7 @@ async def command_reset(message: types.Message, state: FSMContext, client: httpx
         first_step_key = 'name'
         await message.answer(ONBOARDING_STEPS[first_step_key]['question'])
         await state.set_state(ProfileStates.onboarding)
-        await state.update_data(step='occupation') # Сохраняем следующий шаг
+        await state.update_data(current_question=first_step_key) # Сохраняем текущий шаг
     except httpx.RequestError as e:
         logging.error(f"API connection error in /reset for user {user_id}: {e}")
         await message.answer("Телефон глючит, не могу ничего удалить... Попробуй позже, пожалуйста.")
@@ -98,31 +106,49 @@ async def command_reset(message: types.Message, state: FSMContext, client: httpx
 # --- Единый хендлер для всей анкеты ---
 @router.message(ProfileStates.onboarding)
 async def process_onboarding(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
-    current_data = await state.get_data()
-    # Определяем, какой ключ мы сохраняли на предыдущем шаге
-    previous_step_key = list(ONBOARDING_STEPS.keys())[list(ONBOARDING_STEPS.values()).index(next(v for v in ONBOARDING_STEPS.values() if v['next_step'] == current_data.get('step')))]
-    
-    # Сохраняем ответ пользователя
-    await state.update_data({previous_step_key: message.text})
-    
-    current_step_key = current_data.get('step')
-    step_info = ONBOARDING_STEPS[current_step_key]
-    
-    # Задаем следующий вопрос
-    question = step_info['question']
-    if '{}' in question: # Форматируем вопрос, если нужно (для имени)
-        question = question.format(message.text)
-    await message.answer(question)
-    
-    next_step_key = step_info['next_step']
-    if next_step_key:
-        # Переходим к следующему шагу
-        await state.update_data(step=next_step_key)
-    else:
-        # Это был последний шаг, сохраняем профиль
-        user_data = await state.get_data()
-        profile_data = {key: user_data[key] for key in ONBOARDING_STEPS.keys()}
+    data = await state.get_data()
+    answered_question_key = data.get('current_question')
+
+    if not answered_question_key:
+        await state.clear()
+        await message.answer("Ой, что-то пошло не так... Давай начнем сначала с /reset")
+        return
+
+    # Сохраняем ответ
+    user_response = message.text
+    await state.update_data({answered_question_key: user_response})
+
+    # Если ответили на вопрос о городе, определяем таймзону
+    if answered_question_key == 'city':
+        try:
+            location = geolocator.geocode(user_response)
+            timezone = tf.timezone_at(lng=location.longitude, lat=location.latitude) if location else "UTC"
+        except Exception as e:
+            logging.error(f"Could not determine timezone for {user_response}: {e}")
+            timezone = "UTC"
+        await state.update_data(timezone=timezone)
+
+    # Определяем следующий шаг
+    next_question_key = ONBOARDING_STEPS[answered_question_key]['next_step']
+
+    if next_question_key:
+        # Задаем следующий вопрос
+        step_info = ONBOARDING_STEPS[next_question_key]
+        question = step_info['question']
         
+        if next_question_key == 'occupation':
+            current_user_data = await state.get_data()
+            question = question.format(current_user_data.get('name', '...'))
+
+        await message.answer(question)
+        await state.update_data(current_question=next_question_key)
+    else:
+        # Это был последний вопрос, сохраняем профиль
+        user_data = await state.get_data()
+        profile_data = {key: user_data.get(key) for key in ONBOARDING_STEPS.keys() if key in user_data}
+        if 'timezone' in user_data:
+            profile_data['timezone'] = user_data['timezone']
+
         try:
             await client.post(f"{API_BASE_URL}/profile", json={"user_id": message.from_user.id, "data": profile_data})
             await state.clear()
@@ -149,7 +175,8 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
 
         payload = {
             "user_id": message.from_user.id,
-            "message": message.text
+            "message": message.text,
+            "timestamp": message.date.isoformat()
         }
         # Увеличиваем таймаут для долгих ответов от AI
         response = await client.post(

@@ -7,9 +7,11 @@ from functools import partial
 from google import genai
 from google.genai import types
 from prompts import BASE_SYSTEM_PROMPT
+from personality_prompts import PERSONALITIES
 # Импортируем все необходимые функции из database.py
 from server.database import get_profile, UserProfile, save_long_term_memory, get_long_term_memories
 from datetime import datetime, timedelta
+import pytz
 # Словарь для хранения активных сессий чата с Gemini
 user_chat_sessions = {}
 
@@ -67,7 +69,7 @@ async def get_or_create_chat_session(user_id: int):
             raise ValueError("Профиль пользователя не найден для создания сессии!")
 
         user_context = generate_user_prompt(profile)
-        personalized_prompt = BASE_SYSTEM_PROMPT.format(user_context=user_context)
+        personalized_prompt = BASE_SYSTEM_PROMPT.format(user_context=user_context, PERSONALITIES=PERSONALITIES)
         
         model = "gemini-2.5-flash"
         tools = types.Tool(function_declarations=[add_memory_function, get_memories_function])
@@ -84,11 +86,21 @@ async def get_or_create_chat_session(user_id: int):
         
     return user_chat_sessions[user_id]
 
-async def generate_ai_response(user_id: int, user_message: str) -> str:
-    logging.info(f"Получено сообщение от пользователя {user_id}: '{user_message}'")
+async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime) -> str:
+    logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
     try:
-        chat_session = await get_or_create_chat_session(user_id)
-        
+        profile = await get_profile(user_id)
+        if not profile or not profile.timezone:
+            # Если профиля или таймзоны нет, работаем по-старому
+            chat_session = await get_or_create_chat_session(user_id)
+            formatted_message = user_message
+        else:
+            # Конвертируем время в таймзону пользователя
+            user_timezone = pytz.timezone(profile.timezone)
+            user_time = timestamp.astimezone(user_timezone)
+            formatted_message = f"[Время моего сообщения: {user_time.strftime('%H:%M')}] {user_message}"
+            chat_session = await get_or_create_chat_session(user_id)
+
         available_functions = {
             "save_long_term_memory": partial(save_long_term_memory, user_id),
             "get_long_term_memories": partial(get_long_term_memories, user_id),
@@ -96,7 +108,7 @@ async def generate_ai_response(user_id: int, user_message: str) -> str:
 
         # Отправляем первоначальное сообщение пользователя
         response = await asyncio.to_thread(
-            chat_session.send_message, user_message
+            chat_session.send_message, formatted_message
         )
 
         while True:

@@ -48,7 +48,10 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
         await session.commit()
         return {"status": "success", "fact_saved": fact}
 
-async def get_long_term_memories(user_id: int, limit: int = 20) -> list[LongTermMemory]:
+# server/database.py
+
+# Измените тип возвращаемого значения для большей ясности
+async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
     async with async_session_factory() as session:
         result = await session.execute(
             select(LongTermMemory)
@@ -56,4 +59,19 @@ async def get_long_term_memories(user_id: int, limit: int = 20) -> list[LongTerm
             .order_by(desc(LongTermMemory.timestamp))
             .limit(limit)
         )
-        return result.scalars().all()
+        memories = result.scalars().all()
+
+        # Преобразуем список объектов в список словарей
+        formatted_memories = [
+            {
+                "fact": mem.fact,
+                "category": mem.category,
+                # Преобразуем timestamp в строку, чтобы он был JSON-сериализуемым
+                "timestamp": str(mem.timestamp) 
+            }
+            for mem in memories
+        ]
+
+        # Возвращаем один словарь, как того ожидает API Gemini
+        # Ключ "memories" поможет модели понять структуру данных
+        return {"memories": formatted_memories}

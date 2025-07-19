@@ -16,6 +16,7 @@ class UserProfile(Base):
     occupation: Mapped[str] = mapped_column(nullable=True)
     hobby: Mapped[str] = mapped_column(nullable=True)
     place: Mapped[str] = mapped_column(nullable=True)
+    timezone: Mapped[str] = mapped_column(nullable=True)
 
     def to_dict(self):
         return {
