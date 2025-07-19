@@ -1,8 +1,10 @@
 from pydantic import BaseModel
+from datetime import datetime
 
 class ChatRequest(BaseModel):
     user_id: int
     message: str
+
 
 class ChatResponse(BaseModel):
     response_text: str
