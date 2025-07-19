@@ -45,8 +45,6 @@ get_memories_function = {
                 "description": "Максимальное количество воспоминаний для извлечения. Если не указано, вернется 20."
             }
         },
-        # "required" пустой, так как параметр 'limit' не является обязательным.
-        # Модель может вызвать эту функцию и без него.
         "required": []
     }
 }
@@ -73,7 +71,7 @@ async def get_or_create_chat_session(user_id: int):
         
         model = "gemini-2.5-flash"
         tools = types.Tool(function_declarations=[add_memory_function, get_memories_function])
-        config = types.GenerateContentConfig(tools=[tools], system_instruction=personalized_prompt)
+        config = types.GenerateContentConfig(tools=[tools], system_instruction=personalized_prompt, thinking_config=types.ThinkingConfig(thinking_budget=-1))
         
         # Создаем чат через новый SDK
         client = genai.Client()

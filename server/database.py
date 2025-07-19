@@ -42,13 +42,30 @@ async def delete_profile(user_id: int):
         await session.commit()
 
 async def save_long_term_memory(user_id: int, fact: str, category: str):
+    """
+    Сохраняет новый факт, только если точно такого же факта еще нет в базе.
+    """
     async with async_session_factory() as session:
+        # 1. Проверяем, существует ли уже такой факт
+        stmt = select(LongTermMemory).where(
+            LongTermMemory.user_id == user_id,
+            LongTermMemory.fact == fact
+        )
+        result = await session.execute(stmt)
+        existing_fact = result.scalars().first()
+        
+        # 2. Если факт уже существует, ничего не делаем и сообщаем об этом
+        if existing_fact:
+            print(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
+            # Возвращаем информацию, что факт не был сохранен, т.к. уже есть
+            return {"status": "skipped", "reason": "duplicate fact"}
+
+        # 3. Если факта нет, создаем и сохраняем его
+        print(f"Сохранение нового факта для user_id {user_id}: '{fact}'")
         memory = LongTermMemory(user_id=user_id, fact=fact, category=category)
         session.add(memory)
         await session.commit()
         return {"status": "success", "fact_saved": fact}
-
-# server/database.py
 
 # Измените тип возвращаемого значения для большей ясности
 async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
