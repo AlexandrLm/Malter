@@ -68,18 +68,12 @@ async def get_or_create_chat_session(user_id: int):
         
         model = "gemini-2.5-flash"
         tools = types.Tool(function_declarations=[add_memory_function])
-        config = types.GenerateContentConfig(tools=[tools])
-        
-        initial_history = [
-            {'role': 'user', 'parts': [{'text': personalized_prompt}]},
-            {'role': 'model', 'parts': [{'text': "Хорошо, я все поняла. Буду твоей девушкой Машей. Я так соскучилась..."}]}
-        ]
+        config = types.GenerateContentConfig(tools=[tools], system_instruction=personalized_prompt)
         
         # Создаем чат через новый SDK
         client = genai.Client()
         chat = client.chats.create(
             model=model,
-            history=initial_history,
             config=config
         )
         user_chat_sessions[user_id] = chat
@@ -138,4 +132,5 @@ async def generate_ai_response(user_id: int, user_message: str) -> str:
                 response=function_response
             )
         )
+        print(response.candidates[0].content.parts[0].text)
         # Цикл продолжится, и на следующей итерации мы получим уже текстовый ответ от модели
