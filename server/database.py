@@ -2,7 +2,7 @@ from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from config import DATABASE_URL
-from server.models import Base, UserProfile, LongTermMemory
+from server.models import Base, UserProfile, LongTermMemory, ChatHistory
 
 # Создаем асинхронный "движок" и фабрику сессий
 async_engine = create_async_engine(DATABASE_URL)
@@ -39,6 +39,12 @@ async def create_or_update_profile(user_id: int, data: dict):
 async def delete_profile(user_id: int):
     async with async_session_factory() as session:
         await session.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
+        await session.commit()
+
+async def delete_chat_history(user_id: int):
+    """Удаляет всю историю чата для пользователя."""
+    async with async_session_factory() as session:
+        await session.execute(delete(ChatHistory).where(ChatHistory.user_id == user_id))
         await session.commit()
 
 async def save_long_term_memory(user_id: int, fact: str, category: str):
@@ -92,3 +98,28 @@ async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
         # Возвращаем один словарь, как того ожидает API Gemini
         # Ключ "memories" поможет модели понять структуру данных
         return {"memories": formatted_memories}
+
+async def save_chat_message(user_id: int, role: str, content: str):
+    """Сохраняет сообщение в историю чата."""
+    async with async_session_factory() as session:
+        message = ChatHistory(user_id=user_id, role=role, content=content)
+        session.add(message)
+        await session.commit()
+
+async def get_chat_history(user_id: int, limit: int = 50) -> list[dict]:
+    """Извлекает историю чата для пользователя."""
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(ChatHistory)
+            .where(ChatHistory.user_id == user_id)
+            .order_by(desc(ChatHistory.timestamp))
+            .limit(limit)
+        )
+        # Получаем сообщения и сразу разворачиваем, чтобы новые были в конце
+        messages = result.scalars().all()[::-1]
+        
+        history = [
+            {"role": msg.role, "parts": [{"text": msg.content}]}
+            for msg in messages
+        ]
+        return history

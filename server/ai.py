@@ -1,20 +1,31 @@
 import logging
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 import asyncio
-import re
 from functools import partial
 from google import genai
-from google.genai import types
+from google.genai import types as genai_types
 from prompts import BASE_SYSTEM_PROMPT
 from personality_prompts import PERSONALITIES
-# Импортируем все необходимые функции из database.py
-from server.database import get_profile, UserProfile, save_long_term_memory, get_long_term_memories
-from datetime import datetime, timedelta
+from config import MODEL_NAME
+from server.database import (
+    get_profile,
+    UserProfile,
+    save_long_term_memory,
+    get_long_term_memories,
+    save_chat_message,
+    get_chat_history
+)
+from datetime import datetime
 import pytz
-# Словарь для хранения активных сессий чата с Gemini
-user_chat_sessions = {}
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+try:
+    client = genai.Client()
+except Exception as e:
+    logging.critical(f"Не удалось инициализировать Gemini Client: {e}")
+    client = None
+
+# --- Описание инструментов для модели ---
 add_memory_function = {
     "name": "save_long_term_memory",
     "description": "Сохраняет важный факт о пользователе или ваших отношениях в долгосрочную память. Используй эту функцию, когда пользователь прямо просит что-то запомнить или делится новой важной информацией о себе.",
@@ -49,8 +60,8 @@ get_memories_function = {
     }
 }
 
-
 def generate_user_prompt(profile: UserProfile):
+    """Генерирует часть системного промпта с информацией о пользователе."""
     return (
         f"- Его зовут: {profile.name}.\n"
         f"- Его занятие: {profile.occupation}.\n"
@@ -58,93 +69,101 @@ def generate_user_prompt(profile: UserProfile):
         f"- Наше особенное место: {profile.place}.\n"
     )
 
-async def get_or_create_chat_session(user_id: int):
-    if user_id not in user_chat_sessions:
-        logging.info(f"Создание новой сессии чата для пользователя {user_id}")
+async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime) -> str:
+    """
+    Генерирует ответ AI с использованием `generate_content`, сохраняя и извлекая историю чата из БД.
+    """
+    logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
+    if client is None:
+        logging.error("Клиент Gemini не инициализирован.")
+        return "Произошла критическая ошибка конфигурации. Попробуйте еще раз позже."
+        
+    try:
         profile = await get_profile(user_id)
         if not profile:
             logging.error(f"Профиль пользователя {user_id} не найден!")
-            raise ValueError("Профиль пользователя не найден для создания сессии!")
+            return "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение."
+
+        formatted_message = user_message
+        if profile.timezone:
+            try:
+                user_timezone = pytz.timezone(profile.timezone)
+                user_time = timestamp.astimezone(user_timezone)
+                formatted_message = f"[Время моего сообщения: {user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
+            except pytz.UnknownTimeZoneError:
+                logging.warning(f"Неизвестная таймзона '{profile.timezone}' для пользователя {user_id}")
+
+        await save_chat_message(user_id, 'user', formatted_message)
 
         user_context = generate_user_prompt(profile)
-        personalized_prompt = BASE_SYSTEM_PROMPT.format(user_context=user_context, PERSONALITIES=PERSONALITIES)
+        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, PERSONALITIES=PERSONALITIES)
         
-        model = "gemini-2.5-flash"
-        tools = types.Tool(function_declarations=[add_memory_function, get_memories_function])
-        config = types.GenerateContentConfig(tools=[tools], system_instruction=personalized_prompt, thinking_config=types.ThinkingConfig(thinking_budget=-1))
+        history = await get_chat_history(user_id)
         
-        # Создаем чат через новый SDK
-        client = genai.Client()
-        chat = client.chats.create(
-            model=model,
-            config=config
-        )
-        user_chat_sessions[user_id] = chat
-        logging.info(f"Новая сессия чата для пользователя {user_id} успешно создана.")
+        tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
         
-    return user_chat_sessions[user_id]
-
-async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime) -> str:
-    logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
-    try:
-        profile = await get_profile(user_id)
-        if not profile or not profile.timezone:
-            # Если профиля или таймзоны нет, работаем по-старому
-            chat_session = await get_or_create_chat_session(user_id)
-            formatted_message = user_message
-        else:
-            # Конвертируем время в таймзону пользователя
-            user_timezone = pytz.timezone(profile.timezone)
-            user_time = timestamp.astimezone(user_timezone)
-            formatted_message = f"[Время моего сообщения: {user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
-            chat_session = await get_or_create_chat_session(user_id)
-
         available_functions = {
             "save_long_term_memory": partial(save_long_term_memory, user_id),
             "get_long_term_memories": partial(get_long_term_memories, user_id),
         }
 
-        # Отправляем первоначальное сообщение пользователя
-        response = await asyncio.to_thread(
-            chat_session.send_message, formatted_message
-        )
-
         while True:
+            if not formatted_message:
+                 contents = history
+            else:
+                 contents = history + [{"role": "user", "parts": [{"text": formatted_message}]}]
+
+            response =client.models.generate_content(
+                model=MODEL_NAME,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    tools=[tools],
+                    system_instruction=system_instruction
+                ),
+            )
+
+            if not response.candidates:
+                logging.warning(f"Ответ от API для пользователя {user_id} не содержит кандидатов.")
+                return "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности."
+
+            candidate = response.candidates[0]
             function_call = None
-            try:
-                function_call = response.candidates[0].content.parts[0].function_call
-            except (IndexError, AttributeError):
-                pass
+            if candidate.content and candidate.content.parts and hasattr(candidate.content.parts[0], 'function_call'):
+                function_call = candidate.content.parts[0].function_call
 
             if not function_call:
                 final_response = response.text.strip()
                 logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{final_response}'")
+                await save_chat_message(user_id, 'model', final_response)
                 return final_response
 
             function_name = function_call.name
             logging.info(f"Модель вызвала функцию: {function_name}")
-            
+
             if function_name not in available_functions:
                 logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
-                return f"Ошибка: модель попыталась вызвать неизвестную функцию '{function_name}'"
+                history.append({"role": "model", "parts": [{"text": f"Вызвана неизвестная функция: {function_name}"}]})
+                formatted_message = "Произошла ошибка при вызове функции."
+                continue
 
             function_to_call = available_functions[function_name]
-            function_args = function_call.args
-            logging.info(f"Аргументы функции: {dict(function_args)}")
+            function_args = {key: value for key, value in function_call.args.items()}
+            logging.info(f"Аргументы функции: {function_args}")
 
-            function_response = await function_to_call(**dict(function_args))
-            logging.info(f"Результат функции '{function_name}': {function_response}")
+            function_response_data = await function_to_call(**function_args)
+            logging.info(f"Результат функции '{function_name}': {function_response_data}")
 
-            response = await asyncio.to_thread(
-                chat_session.send_message,
-                types.Part.from_function_response(
-                    name=function_name,
-                    response=function_response
-                )
-            )
-            # Логируем текстовую часть ответа модели после вызова функции, если она есть
-            if response.candidates and response.candidates[0].content.parts:
-                 logging.info(f"Промежуточный ответ модели: '{response.candidates[0].content.parts[0].text}'")
+            history.append({"role": "model", "parts": [genai_types.Part(function_call=function_call)]})
+            history.append({
+                "role": "function",
+                "parts": [genai_types.Part(
+                    function_response=genai_types.FunctionResponse(
+                        name=function_name,
+                        response=function_response_data,
+                    )
+                )]
+            })
+            formatted_message = "" 
 
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)

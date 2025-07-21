@@ -6,8 +6,8 @@ from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 
-from server.database import init_db, get_profile, create_or_update_profile, delete_profile
-from server.ai import generate_ai_response, user_chat_sessions
+from server.database import init_db, get_profile, create_or_update_profile, delete_profile, delete_chat_history
+from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate
 
@@ -78,10 +78,9 @@ async def create_or_update_profile_handler(request: ProfileUpdate):
 @app.delete("/profile/{user_id}")
 async def delete_profile_handler(user_id: int):
     await delete_profile(user_id)
-    # Также удаляем сессию чата, если она есть
-    if user_id in user_chat_sessions:
-        del user_chat_sessions[user_id]
-    return {"message": "Профиль успешно удален"}
+    # Также удаляем историю чата пользователя
+    await delete_chat_history(user_id)
+    return {"message": "Профиль и история чата успешно удалены"}
 
 
 # --- FSM для анкеты ---

@@ -35,3 +35,12 @@ class LongTermMemory(Base):
     # Категория поможет в будущем фильтровать воспоминания
     category: Mapped[str] = mapped_column(nullable=True) 
     timestamp: Mapped[str] = mapped_column(server_default=func.now()) # sqlalchemy.sql.func
+
+class ChatHistory(Base):
+   __tablename__ = "chat_history"
+   
+   id: Mapped[int] = mapped_column(primary_key=True)
+   user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+   role: Mapped[str] = mapped_column(nullable=False) # 'user' or 'model'
+   content: Mapped[str] = mapped_column(nullable=False)
+   timestamp: Mapped[str] = mapped_column(server_default=func.now())
