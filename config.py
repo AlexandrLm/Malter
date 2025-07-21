@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
 API_BASE_URL = "http://127.0.0.1:8000"
 # Чтобы переключиться на PostgreSQL, просто закомментируйте строку для SQLite
 # и раскомментируйте строку для PostgreSQL, указав свои данные.
