@@ -25,7 +25,6 @@ except Exception as e:
     logging.critical(f"Не удалось инициализировать Gemini Client: {e}")
     client = None
 
-# --- Описание инструментов для модели ---
 add_memory_function = {
     "name": "save_long_term_memory",
     "description": "Сохраняет важный факт о пользователе или ваших отношениях в долгосрочную память. Используй эту функцию, когда пользователь прямо просит что-то запомнить или делится новой важной информацией о себе.",
@@ -118,24 +117,49 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 contents=contents,
                 config=genai_types.GenerateContentConfig(
                     tools=[tools],
-                    system_instruction=system_instruction
+                    system_instruction=system_instruction,
+                    thinking_config=genai_types.ThinkingConfig(
+                        include_thoughts=True,
+                        thinking_budget=-1
+                    )
                 ),
             )
+            logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{response}'")
 
             if not response.candidates:
                 logging.warning(f"Ответ от API для пользователя {user_id} не содержит кандидатов.")
                 return "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности."
 
             candidate = response.candidates[0]
+            # ИСПРАВЛЕННЫЙ И НАДЕЖНЫЙ КОД
             function_call = None
-            if candidate.content and candidate.content.parts and hasattr(candidate.content.parts[0], 'function_call'):
-                function_call = candidate.content.parts[0].function_call
+            if candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    try:
+                        # Просто пытаемся получить доступ к атрибуту
+                        if part.function_call: 
+                            function_call = part.function_call
+                            break # Нашли, выходим из цикла
+                    except AttributeError:
+                        # Если у части нет атрибута .function_call, будет ошибка AttributeError.
+                        # Мы ее ловим и просто переходим к следующей части.
+                        continue
 
             if not function_call:
-                final_response = response.text.strip()
-                logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{final_response}'")
-                await save_chat_message(user_id, 'model', final_response)
-                return final_response
+                # Эта ветка теперь будет выполняться только тогда, 
+                # когда вызова функции ДЕЙСТВИТЕЛЬНО нет и есть текстовый ответ.
+                if response.text: # Добавим проверку на случай пустого ответа
+                    final_response = response.text.strip()
+                    logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{final_response}'")
+                    await save_chat_message(user_id, 'model', final_response)
+                    return final_response
+                else:
+                    # Обработка случая, когда нет ни текста, ни функции (например, из-за фильтров безопасности)
+                    logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции.")
+                    final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+                    await save_chat_message(user_id, 'model', final_response)
+                    return final_response
+
 
             function_name = function_call.name
             logging.info(f"Модель вызвала функцию: {function_name}")
