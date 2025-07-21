@@ -112,7 +112,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             else:
                  contents = history + [{"role": "user", "parts": [{"text": formatted_message}]}]
 
-            response =client.models.generate_content(
+            response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=contents,
                 config=genai_types.GenerateContentConfig(
