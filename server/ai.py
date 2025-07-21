@@ -27,17 +27,17 @@ except Exception as e:
 
 add_memory_function = {
     "name": "save_long_term_memory",
-    "description": "Сохраняет важный факт о пользователе или ваших отношениях в долгосрочную память. Используй эту функцию, когда пользователь прямо просит что-то запомнить или делится новой важной информацией о себе.",
+    "description": "Сохраняет НОВЫЙ важный факт о пользователе в долгосрочную память. Используй ТОЛЬКО когда: 1) Пользователь прямо просит запомнить что-то ('запомни, что...'), 2) Пользователь впервые делится личной информацией, 3) Пользователь исправляет/обновляет информацию о себе. НЕ используй для информации, которую ты уже знаешь или когда пользователь спрашивает 'что помнишь?'",
     "parameters": {
         "type": "object",
         "properties": {
             "fact": {
                 "type": "string",
-                "description": "Конкретный факт, который нужно запомнить. Например: 'пользователь любит черный кофе' или 'первое свидание было в парке Горького'."
+                "description": "Конкретный НОВЫЙ факт, который нужно запомнить. Например: 'пользователь любит черный кофе' или 'у пользователя родился котенок'."
             },
             "category": {
                 "type": "string",
-                "description": "Категория факта, чтобы его было легче найти в будущем. Например: 'предпочтения', 'воспоминания', 'работа', 'семья'."
+                "description": "Категория факта. Варианты: 'предпочтения', 'воспоминания', 'работа', 'семья', 'питомцы', 'здоровье', 'хобби'."
             }
         },
         "required": ["fact", "category"]
@@ -46,13 +46,13 @@ add_memory_function = {
 
 get_memories_function = {
     "name": "get_long_term_memories",
-    "description": "Извлекает из памяти ранее сохраненные факты (воспоминания) о пользователе. Используй эту функцию, чтобы освежить память о чем-то, что обсуждалось ранее, или чтобы найти релевантную информацию для ответа на вопрос пользователя.",
+    "description": "Извлекает из памяти ранее сохраненные факты о пользователе. Используй когда: 1) Нужно вспомнить конкретные детали, которых нет в текущем контексте, 2) Пользователь спрашивает о прошлых беседах или общих воспоминаниях, 3) Ты не уверена в детали, на которую ссылается пользователь. НЕ нужно использовать, если информация уже есть в текущей беседе.",
     "parameters": {
         "type": "object",
         "properties": {
             "limit": {
                 "type": "integer",
-                "description": "Максимальное количество воспоминаний для извлечения. Если не указано, вернется 20."
+                "description": "Максимальное количество воспоминаний для извлечения (по умолчанию 20)."
             }
         },
         "required": []
@@ -131,34 +131,43 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 return "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности."
 
             candidate = response.candidates[0]
-            # ИСПРАВЛЕННЫЙ И НАДЕЖНЫЙ КОД
+            # Проверяем, есть ли текстовый ответ (модель может генерировать и текст, и функцию одновременно)
+            text_response = None
             function_call = None
+            
             if candidate.content and candidate.content.parts:
                 for part in candidate.content.parts:
                     try:
-                        # Просто пытаемся получить доступ к атрибуту
-                        if part.function_call: 
-                            function_call = part.function_call
-                            break # Нашли, выходим из цикла
+                        # Проверяем текстовую часть
+                        if hasattr(part, 'text') and part.text:
+                            text_response = part.text.strip()
                     except AttributeError:
-                        # Если у части нет атрибута .function_call, будет ошибка AttributeError.
-                        # Мы ее ловим и просто переходим к следующей части.
-                        continue
+                        pass
+                    
+                    try:
+                        # Проверяем вызов функции
+                        if hasattr(part, 'function_call') and part.function_call:
+                            function_call = part.function_call
+                    except AttributeError:
+                        pass
 
-            if not function_call:
-                # Эта ветка теперь будет выполняться только тогда, 
-                # когда вызова функции ДЕЙСТВИТЕЛЬНО нет и есть текстовый ответ.
-                if response.text: # Добавим проверку на случай пустого ответа
-                    final_response = response.text.strip()
-                    logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{final_response}'")
-                    await save_chat_message(user_id, 'model', final_response)
-                    return final_response
-                else:
-                    # Обработка случая, когда нет ни текста, ни функции (например, из-за фильтров безопасности)
-                    logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции.")
-                    final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
-                    await save_chat_message(user_id, 'model', final_response)
-                    return final_response
+            # Если есть текстовый ответ и НЕТ вызова функции - возвращаем текст
+            if text_response and not function_call:
+                logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{text_response}'")
+                await save_chat_message(user_id, 'model', text_response)
+                return text_response
+            
+            # Если есть и текст, и функция - НЕ возвращаем текст (это обычно thoughts)
+            if text_response and function_call:
+                logging.info(f"Модель сгенерировала текст и вызвала функцию. Текст (thoughts): '{text_response}'")
+                # НЕ сохраняем этот текст - это внутренние размышления модели
+            
+            # Если нет вызова функции и нет текста
+            if not function_call and not text_response:
+                logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции.")
+                final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+                await save_chat_message(user_id, 'model', final_response)
+                return final_response
 
 
             function_name = function_call.name
@@ -177,7 +186,9 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             function_response_data = await function_to_call(**function_args)
             logging.info(f"Результат функции '{function_name}': {function_response_data}")
 
+            # Добавляем вызов функции в историю
             history.append({"role": "model", "parts": [genai_types.Part(function_call=function_call)]})
+            # Добавляем результат функции в историю
             history.append({
                 "role": "function",
                 "parts": [genai_types.Part(
@@ -187,7 +198,10 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                     )
                 )]
             })
-            formatted_message = "" 
+            
+            # Продолжаем цикл для генерации финального ответа после функции
+            # (не возвращаем text_response, так как это могли быть внутренние размышления)
+            formatted_message = ""
 
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)
