@@ -96,7 +96,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             # Конвертируем время в таймзону пользователя
             user_timezone = pytz.timezone(profile.timezone)
             user_time = timestamp.astimezone(user_timezone)
-            formatted_message = f"[Время моего сообщения: {user_time.strftime('%H:%M')}] {user_message}"
+            formatted_message = f"[Время моего сообщения: {user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
             chat_session = await get_or_create_chat_session(user_id)
 
         available_functions = {
