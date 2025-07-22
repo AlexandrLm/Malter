@@ -27,17 +27,17 @@ except Exception as e:
 
 add_memory_function = {
     "name": "save_long_term_memory",
-    "description": "Сохраняет НОВЫЙ важный факт о пользователе в долгосрочную память. Используй ТОЛЬКО когда: 1) Пользователь прямо просит запомнить что-то ('запомни, что...'), 2) Пользователь впервые делится личной информацией, 3) Пользователь исправляет/обновляет информацию о себе. НЕ используй для информации, которую ты уже знаешь или когда пользователь спрашивает 'что помнишь?'",
+    "description": "Saves a NEW, important fact about the user. Use ONLY when: user explicitly asks to remember, shares new personal info, or corrects existing info. AVOID using for known facts or questions like 'what do you remember?'.",
     "parameters": {
         "type": "object",
         "properties": {
             "fact": {
                 "type": "string",
-                "description": "Конкретный НОВЫЙ факт, который нужно запомнить. Например: 'пользователь любит черный кофе' или 'у пользователя родился котенок'."
+                "description": "The specific NEW fact to save. Example: 'user likes black coffee'."
             },
             "category": {
                 "type": "string",
-                "description": "Категория факта. Варианты: 'предпочтения', 'воспоминания', 'работа', 'семья', 'питомцы', 'здоровье', 'хобби'."
+                "description": "Category: 'preferences', 'memories', 'work', 'family', 'pets', 'health', 'hobbies'."
             }
         },
         "required": ["fact", "category"]
@@ -46,13 +46,13 @@ add_memory_function = {
 
 get_memories_function = {
     "name": "get_long_term_memories",
-    "description": "Извлекает из памяти ранее сохраненные факты о пользователе. Используй когда: 1) Нужно вспомнить конкретные детали, которых нет в текущем контексте, 2) Пользователь спрашивает о прошлых беседах или общих воспоминаниях, 3) Ты не уверена в детали, на которую ссылается пользователь. НЕ нужно использовать, если информация уже есть в текущей беседе.",
+    "description": "Retrieves saved facts about the user. Use when you need details not in the current context, or when the user asks about the past ('what do you remember?'). AVOID using if the info is already present.",
     "parameters": {
         "type": "object",
         "properties": {
             "limit": {
                 "type": "integer",
-                "description": "Максимальное количество воспоминаний для извлечения (по умолчанию 20)."
+                "description": "Max number of memories to retrieve (default 20)."
             }
         },
         "required": []
@@ -95,7 +95,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         await save_chat_message(user_id, 'user', formatted_message)
 
         user_context = generate_user_prompt(profile)
-        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, PERSONALITIES=PERSONALITIES)
+        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
         
         history = await get_chat_history(user_id)
         
@@ -119,8 +119,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                     tools=[tools],
                     system_instruction=system_instruction,
                     thinking_config=genai_types.ThinkingConfig(
-                        include_thoughts=True,
-                        thinking_budget=-1
+                        thinking_budget=512
                     )
                 ),
             )
@@ -128,80 +127,63 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             if not response.candidates:
                 logging.warning(f"Ответ от API для пользователя {user_id} не содержит кандидатов.")
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                    logging.error(f"Запрос для {user_id} заблокирован: {response.prompt_feedback.block_reason_message}")
+                    return f"Я не могу ответить на это. Запрос был заблокирован."
                 return "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности."
 
             candidate = response.candidates[0]
-            # Проверяем, есть ли текстовый ответ (модель может генерировать и текст, и функцию одновременно)
-            text_response = None
-            function_call = None
-            
-            if candidate.content and candidate.content.parts:
-                for part in candidate.content.parts:
-                    try:
-                        # Проверяем текстовую часть
-                        if hasattr(part, 'text') and part.text:
-                            text_response = part.text.strip()
-                    except AttributeError:
-                        pass
-                    
-                    try:
-                        # Проверяем вызов функции
-                        if hasattr(part, 'function_call') and part.function_call:
-                            function_call = part.function_call
-                    except AttributeError:
-                        pass
 
-            # Если есть текстовый ответ и НЕТ вызова функции - возвращаем текст
-            if text_response and not function_call:
-                logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{text_response}'")
-                await save_chat_message(user_id, 'model', text_response)
-                return text_response
+            # Проверяем, хочет ли модель вызвать функцию, используя свойство верхнего уровня
+            if response.function_calls:
+                function_call = response.function_calls[0]
+                function_name = function_call.name
+                logging.info(f"Модель вызвала функцию: {function_name}")
+
+                if function_name not in available_functions:
+                    logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
+                    history.append({"role": "model", "parts": [{"text": f"Вызвана неизвестная функция: {function_name}"}]})
+                    formatted_message = "Произошла ошибка при вызове функции."
+                    continue
+
+                function_to_call = available_functions[function_name]
+                function_args = dict(function_call.args)
+                logging.info(f"Аргументы функции: {function_args}")
+
+                function_response_data = await function_to_call(**function_args)
+                logging.info(f"Результат функции '{function_name}': {function_response_data}")
+
+                # Добавляем в историю ход модели (с вызовом функции)
+                history.append(candidate.content)
+                # Добавляем в историю результат вызова функции
+                history.append({
+                    "role": "function",
+                    "parts": [genai_types.Part(
+                        function_response=genai_types.FunctionResponse(
+                            name=function_name,
+                            # Оборачивание ответа в dict - хорошая практика
+                            response={"result": function_response_data},
+                        )
+                    )]
+                })
+                
+                # Очищаем сообщение и продолжаем цикл для получения финального ответа от модели
+                formatted_message = ""
+                continue
             
-            # Если есть и текст, и функция - НЕ возвращаем текст (это обычно thoughts)
-            if text_response and function_call:
-                logging.info(f"Модель сгенерировала текст и вызвала функцию. Текст (thoughts): '{text_response}'")
-                # НЕ сохраняем этот текст - это внутренние размышления модели
-            
-            # Если нет вызова функции и нет текста
-            if not function_call and not text_response:
-                logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции.")
-                final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+            # Если вызова функции нет, обрабатываем текстовый ответ
+            elif response.text:
+                final_response = response.text.strip()
+                logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
                 await save_chat_message(user_id, 'model', final_response)
                 return final_response
 
-
-            function_name = function_call.name
-            logging.info(f"Модель вызвала функцию: {function_name}")
-
-            if function_name not in available_functions:
-                logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
-                history.append({"role": "model", "parts": [{"text": f"Вызвана неизвестная функция: {function_name}"}]})
-                formatted_message = "Произошла ошибка при вызове функции."
-                continue
-
-            function_to_call = available_functions[function_name]
-            function_args = {key: value for key, value in function_call.args.items()}
-            logging.info(f"Аргументы функции: {function_args}")
-
-            function_response_data = await function_to_call(**function_args)
-            logging.info(f"Результат функции '{function_name}': {function_response_data}")
-
-            # Добавляем вызов функции в историю
-            history.append({"role": "model", "parts": [genai_types.Part(function_call=function_call)]})
-            # Добавляем результат функции в историю
-            history.append({
-                "role": "function",
-                "parts": [genai_types.Part(
-                    function_response=genai_types.FunctionResponse(
-                        name=function_name,
-                        response=function_response_data,
-                    )
-                )]
-            })
-            
-            # Продолжаем цикл для генерации финального ответа после функции
-            # (не возвращаем text_response, так как это могли быть внутренние размышления)
-            formatted_message = ""
+            # Обрабатываем случай, когда нет ни текста, ни вызова функции (например, сработал фильтр безопасности)
+            else:
+                logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции. Причина: {candidate.finish_reason}")
+                final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+                await save_chat_message(user_id, 'model', final_response)
+                return final_response
 
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)

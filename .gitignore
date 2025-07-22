@@ -13,7 +13,7 @@ env/
 
 # --- Файлы Python ---
 # Кеш и скомпилированные файлы Python.
-__pycache__/
+__pycache__\
 *.pyc
 *.pyo
 *.pyd
@@ -34,6 +34,9 @@ profiles.db
 .spyderproject/
 .project
 .pydevproject
+.roomodes
+.roo
+.kilocode
 
 
 # --- Системные и временные файлы ---

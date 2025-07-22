@@ -106,7 +106,7 @@ async def save_chat_message(user_id: int, role: str, content: str):
         session.add(message)
         await session.commit()
 
-async def get_chat_history(user_id: int, limit: int = 50) -> list[dict]:
+async def get_chat_history(user_id: int, limit: int = 30) -> list[dict]:
     """Извлекает историю чата для пользователя."""
     async with async_session_factory() as session:
         result = await session.execute(
