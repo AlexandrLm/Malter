@@ -11,12 +11,12 @@ API_BASE_URL = "http://127.0.0.1:8000"
 
 # Вариант 1: SQLite (файл будет создан в той же папке)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///profiles.db")
+# Вариант 2: PostgreSQL (нужно предварительно создать базу данных)
+# DATABASE_URL = "postgresql+asyncpg://user:password@localhost/db_name"
 
 MODEL_NAME = "gemini-2.5-flash-lite-preview-06-17"
 # MODEL_NAME = "gemini-2.5-flash"
 # MODEL_NAME = "gemini-2.5-pro"
-# Вариант 2: PostgreSQL (нужно предварительно создать базу данных)
-# DATABASE_URL = "postgresql+asyncpg://user:password@localhost/db_name"
 
 if not TELEGRAM_TOKEN or not GEMINI_KEY:
     raise ValueError("Необходимо установить TELEGRAM_BOT_TOKEN и GEMINI_API_KEY в .env файле")

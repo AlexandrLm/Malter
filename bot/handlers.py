@@ -1,6 +1,7 @@
 import httpx
 import asyncio
 import logging
+import base64  
 from aiogram import Router, F, types
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -15,6 +16,11 @@ from config import API_BASE_URL
 router = Router()
 tf = TimezoneFinder()
 geolocator = Nominatim(user_agent="MashaGPT")
+
+# ### Константы для управления "печатью" ###
+TYPING_SPEED_CPS = 15  # Символов в секунду
+MIN_TYPING_DELAY = 0.5 # Минимальная задержка в секундах
+MAX_TYPING_DELAY = 4.0 # Максимальная задержка в секундах
 
 # --- FSM для анкеты ---
 
@@ -46,10 +52,25 @@ ONBOARDING_STEPS = {
 }
 
 
+async def simulate_typing_and_send(message: types.Message, text: str):
+    """
+    Имитирует набор текста с реалистичной скоростью и отправляет сообщение.
+    """
+    # 1. Рассчитываем задержку на основе длины текста
+    delay = len(text) / TYPING_SPEED_CPS
+    
+    # 2. Ограничиваем задержку минимальным и максимальным значениями
+    clamped_delay = max(MIN_TYPING_DELAY, min(delay, MAX_TYPING_DELAY))
+
+    # 3. Отправляем экшен "печатает", ждем и отправляем сообщение
+    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+    await asyncio.sleep(clamped_delay)
+    await message.answer(text)
+
+
 async def send_typing_response(message: types.Message, text: str):
     """
-    Вспомогательная функция для отправки сообщений с имитацией набора текста
-    и обработкой разделителя '||'.
+    Отправляет ответ, разделяя его по '||' и имитируя набор для каждой части.
     """
     parts = text.split('||')
     for i, part in enumerate(parts):
@@ -57,13 +78,12 @@ async def send_typing_response(message: types.Message, text: str):
         if not part:
             continue
 
-        if i > 0:
-            delay = max(1.0, min(len(part) / 15, 4.0)) # Упрощенная и более предсказуемая задержка
-            await asyncio.sleep(delay)
+        # Отправляем первую часть с имитацией набора
+        await simulate_typing_and_send(message, part)
 
-        await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-        await asyncio.sleep(0.3) # Короткая пауза для реалистичности
-        await message.answer(part)
+        # Если есть следующая часть, делаем небольшую паузу "на подумать"
+        if i < len(parts) - 1:
+            await asyncio.sleep(1.2)
 
 
 @router.message(CommandStart())
@@ -121,8 +141,8 @@ async def process_onboarding(message: types.Message, state: FSMContext, client: 
     # Если ответили на вопрос о городе, определяем таймзону
     if answered_question_key == 'city':
         try:
-            location = geolocator.geocode(user_response)
-            timezone = tf.timezone_at(lng=location.longitude, lat=location.latitude) if location else "UTC"
+            location = await asyncio.to_thread(geolocator.geocode, user_response)
+            timezone = await asyncio.to_thread(tf.timezone_at, lng=location.longitude, lat=location.latitude) if location else "UTC"
         except Exception as e:
             logging.error(f"Could not determine timezone for {user_response}: {e}")
             timezone = "UTC"
@@ -191,7 +211,6 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
             if voice_bytes_b64:
                 await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.RECORD_VOICE)
                 # API возвращает байты в виде строки base64, декодируем их
-                import base64
                 voice_bytes = base64.b64decode(voice_bytes_b64)
                 await message.answer_voice(types.BufferedInputFile(voice_bytes, "voice.ogg"))
             else:

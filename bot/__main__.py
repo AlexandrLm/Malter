@@ -6,7 +6,7 @@ from .bot import main
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    logging.info("Бот 'Маша' инициализируется...")
+    logging.info("Бот инициализируется...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
