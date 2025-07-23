@@ -1,9 +1,9 @@
-# bot.py
+ # bot.py
 
 import asyncio
 import logging
 import sys
-import httpx # <--- Импортируем
+import httpx
 
 from aiogram import Bot, Dispatcher
 
@@ -30,10 +30,3 @@ async def main():
             await bot.session.close()
             logging.info("Бот остановлен.")
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    logging.info("Бот 'Маша' инициализируется...")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Выход по команде (Ctrl+C)")

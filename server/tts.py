@@ -1,18 +1,21 @@
 import os
+import asyncio
 from google import genai
 from google.genai import types
 from pydub import AudioSegment
 
-def create_telegram_voice_message(text_to_speak, output_filename):
+async def create_telegram_voice_message(text_to_speak, output_filename):
     """
-    Генерирует аудио из текста и сохраняет его в формате OGG/OPUS,
+    Асинхронно генерирует аудио из текста и сохраняет его в формате OGG/OPUS,
     подходящем для голосовых сообщений Telegram.
     """
     try:
         print(f"Генерация аудио для текста: '{text_to_speak}'...")
         client = genai.Client()
 
-        response = client.models.generate_content(
+        # Оборачиваем блокирующий вызов API в to_thread
+        response = await asyncio.to_thread(
+            client.models.generate_content,
             model="gemini-2.5-flash-preview-tts",
             contents=text_to_speak,
             config=types.GenerateContentConfig(
@@ -20,15 +23,13 @@ def create_telegram_voice_message(text_to_speak, output_filename):
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            # Вы можете менять голоса, например: 'Kore', 'Larc', 'Pace'
-                            voice_name='Leda', 
+                            voice_name='Leda',
                         )
                     )
                 ),
             )
         )
 
-        # Получаем сырые аудиоданные (PCM)
         pcm_data = response.candidates[0].content.parts[0].inline_data.data
         print("Аудиоданные получены.")
         audio_segment = AudioSegment(
@@ -39,7 +40,10 @@ def create_telegram_voice_message(text_to_speak, output_filename):
         )
 
         print(f"Конвертация в OGG/OPUS и сохранение в файл '{output_filename}'...")
-        audio_segment.export(output_filename, format="ogg", codec="libopus")
+        # Оборачиваем блокирующий вызов экспорта файла в to_thread
+        await asyncio.to_thread(
+            audio_segment.export, output_filename, format="ogg", codec="libopus"
+        )
 
         print(f"Файл '{output_filename}' успешно создан и готов к отправке в Telegram.")
         return True
@@ -49,7 +53,10 @@ def create_telegram_voice_message(text_to_speak, output_filename):
         return False
 
 # --- Пример использования ---
-if __name__ == "__main__":
+async def main():
     text_ru = "Зевая: Я совершенно не хочу вылезать из-под одеяла. Может, закажем еду?"
     filename_ru = "voice_ru.ogg"
-    create_telegram_voice_message(text_ru, filename_ru)
+    await create_telegram_voice_message(text_ru, filename_ru)
+
+if __name__ == "__main__":
+    asyncio.run(main())

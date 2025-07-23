@@ -88,7 +88,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             try:
                 user_timezone = pytz.timezone(profile.timezone)
                 user_time = timestamp.astimezone(user_timezone)
-                formatted_message = f"[Время моего сообщения: {user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
+                formatted_message = f"[{user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
             except pytz.UnknownTimeZoneError:
                 logging.warning(f"Неизвестная таймзона '{profile.timezone}' для пользователя {user_id}")
 
@@ -106,13 +106,17 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             "get_long_term_memories": partial(get_long_term_memories, user_id),
         }
 
-        while True:
+        max_iterations = 5
+        iteration_count = 0
+        while iteration_count < max_iterations:
+            iteration_count += 1
             if not formatted_message:
-                 contents = history
+                contents = history
             else:
-                 contents = history + [{"role": "user", "parts": [{"text": formatted_message}]}]
+                contents = history + [{"role": "user", "parts": [{"text": formatted_message}]}]
 
-            response = client.models.generate_content(
+            response = await asyncio.to_thread(
+                client.models.generate_content,
                 model=MODEL_NAME,
                 contents=contents,
                 config=genai_types.GenerateContentConfig(
@@ -134,7 +138,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             candidate = response.candidates[0]
 
-            # Проверяем, хочет ли модель вызвать функцию, используя свойство верхнего уровня
             if response.function_calls:
                 function_call = response.function_calls[0]
                 function_name = function_call.name
@@ -153,37 +156,34 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 function_response_data = await function_to_call(**function_args)
                 logging.info(f"Результат функции '{function_name}': {function_response_data}")
 
-                # Добавляем в историю ход модели (с вызовом функции)
                 history.append(candidate.content)
-                # Добавляем в историю результат вызова функции
                 history.append({
                     "role": "function",
                     "parts": [genai_types.Part(
                         function_response=genai_types.FunctionResponse(
                             name=function_name,
-                            # Оборачивание ответа в dict - хорошая практика
                             response={"result": function_response_data},
                         )
                     )]
                 })
                 
-                # Очищаем сообщение и продолжаем цикл для получения финального ответа от модели
                 formatted_message = ""
                 continue
             
-            # Если вызова функции нет, обрабатываем текстовый ответ
             elif response.text:
                 final_response = response.text.strip()
                 logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
                 await save_chat_message(user_id, 'model', final_response)
                 return final_response
 
-            # Обрабатываем случай, когда нет ни текста, ни вызова функции (например, сработал фильтр безопасности)
             else:
                 logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции. Причина: {candidate.finish_reason}")
                 final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
                 await save_chat_message(user_id, 'model', final_response)
                 return final_response
+
+        logging.warning(f"Достигнут лимит итераций ({max_iterations}) для пользователя {user_id}.")
+        return "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое."
 
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)

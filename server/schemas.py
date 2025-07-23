@@ -21,3 +21,7 @@ class ProfileData(BaseModel):
 class ProfileUpdate(BaseModel):
     user_id: int
     data: ProfileData
+
+class ChatHistory(BaseModel):
+    user_id: int
+    history: list[dict]

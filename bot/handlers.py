@@ -187,11 +187,12 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
         
         if response.status_code == 200:
             data = response.json()
-            if data.get("voice_message"):
+            voice_bytes_b64 = data.get("voice_message")
+            if voice_bytes_b64:
                 await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.RECORD_VOICE)
-                # Вместо еще одного запроса, предполагаем, что бэкенд вернет base64 или байты
-                # Но если бэкенд отдает URL, то ваш код с httpx.get() корректен.
-                voice_bytes = httpx.get(data["voice_message"]).content # Оставляем как есть
+                # API возвращает байты в виде строки base64, декодируем их
+                import base64
+                voice_bytes = base64.b64decode(voice_bytes_b64)
                 await message.answer_voice(types.BufferedInputFile(voice_bytes, "voice.ogg"))
             else:
                 await send_typing_response(message, data["response_text"])

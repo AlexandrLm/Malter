@@ -1,6 +1,7 @@
-from sqlalchemy import BigInteger
+from sqlalchemy import BigInteger, DateTime, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
+from datetime import datetime
 
 # Базовый класс для наших моделей
 class Base(DeclarativeBase):
@@ -32,9 +33,8 @@ class LongTermMemory(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fact: Mapped[str] = mapped_column(nullable=False)
-    # Категория поможет в будущем фильтровать воспоминания
     category: Mapped[str] = mapped_column(nullable=True) 
-    timestamp: Mapped[str] = mapped_column(server_default=func.now()) # sqlalchemy.sql.func
+    timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 class ChatHistory(Base):
    __tablename__ = "chat_history"
@@ -43,4 +43,8 @@ class ChatHistory(Base):
    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
    role: Mapped[str] = mapped_column(nullable=False) # 'user' or 'model'
    content: Mapped[str] = mapped_column(nullable=False)
-   timestamp: Mapped[str] = mapped_column(server_default=func.now())
+   timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+   __table_args__ = (
+       Index('idx_chat_history_user_id_timestamp', "user_id", "timestamp"),
+   )

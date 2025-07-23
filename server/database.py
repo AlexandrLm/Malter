@@ -47,6 +47,11 @@ async def delete_chat_history(user_id: int):
         await session.execute(delete(ChatHistory).where(ChatHistory.user_id == user_id))
         await session.commit()
 
+async def delete_long_term_memory(user_id: int):
+    async with async_session_factory() as session:
+        await session.execute(delete(LongTermMemory).where(LongTermMemory.user_id == user_id))
+        await session.commit()
+
 async def save_long_term_memory(user_id: int, fact: str, category: str):
     """
     Сохраняет новый факт, только если точно такого же факта еще нет в базе.
@@ -106,7 +111,7 @@ async def save_chat_message(user_id: int, role: str, content: str):
         session.add(message)
         await session.commit()
 
-async def get_chat_history(user_id: int, limit: int = 30) -> list[dict]:
+async def get_chat_history(user_id: int, limit: int = 20) -> list[dict]:
     """Извлекает историю чата для пользователя."""
     async with async_session_factory() as session:
         result = await session.execute(
