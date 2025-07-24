@@ -97,7 +97,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         user_context = generate_user_prompt(profile)
         system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
         
-        history = await get_chat_history(user_id)
+        history = await get_chat_history(user_id, limit=10)
         
         tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
         
