@@ -84,7 +84,7 @@ async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
         result = await session.execute(
             select(LongTermMemory)
             .where(LongTermMemory.user_id == user_id)
-            .order_by(desc(LongTermMemory.timestamp))
+            .order_by(LongTermMemory.timestamp.desc())
             .limit(limit)
         )
         memories = result.scalars().all()
@@ -117,7 +117,7 @@ async def get_chat_history(user_id: int, limit: int = 10) -> list[dict]:
         result = await session.execute(
             select(ChatHistory)
             .where(ChatHistory.user_id == user_id)
-            .order_by(desc(ChatHistory.timestamp))
+            .order_by(ChatHistory.timestamp.desc())
             .limit(limit)
         )
         # Получаем сообщения и сразу разворачиваем, чтобы новые были в конце

@@ -2,9 +2,8 @@
 
 import asyncio
 import logging
-import sys
-import httpx
 
+import httpx
 from aiogram import Bot, Dispatcher
 
 from config import TELEGRAM_TOKEN

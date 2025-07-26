@@ -62,10 +62,10 @@ get_memories_function = {
 def generate_user_prompt(profile: UserProfile):
     """Генерирует часть системного промпта с информацией о пользователе."""
     return (
-        f"- Его зовут: {profile.name}.\n"
-        f"- Его занятие: {profile.occupation}.\n"
-        f"- Наше любимое общее дело: {profile.hobby}.\n"
-        f"- Наше особенное место: {profile.place}.\n"
+        f"- Имя: {profile.name}.\n"
+        f"- Занимается: {profile.occupation}.\n"
+        f"- Любимое общее дело: {profile.hobby}.\n"
+        f"- Особенное место: {profile.place}.\n"
     )
 
 async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime) -> str:
@@ -113,8 +113,10 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             if not formatted_message:
                 contents = history
             else:
-                contents = history + [{"role": "user", "parts": [{"text": formatted_message}]}]
+                contents = history #+ [{"role": "user", "parts": [{"text": formatted_message}]}]
 
+            # print(contents)
+            # print(system_instruction)
             response = await asyncio.to_thread(
                 client.models.generate_content,
                 model=MODEL_NAME,

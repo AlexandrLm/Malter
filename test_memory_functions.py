@@ -20,7 +20,8 @@ async def setup_database():
     yield
     # Очистка после теста
     async with async_session_factory() as session:
-        await session.run_sync(LongTermMemory.metadata.drop_all)
+        await session.execute(LongTermMemory.__table__.delete())
+        await session.commit()
 
 @patch('server.ai.client')
 async def test_save_new_fact(mock_genai_client):
@@ -38,9 +39,11 @@ async def test_save_new_fact(mock_genai_client):
 
     # Проверяем, что факт действительно сохранился в БД
     async with async_session_factory() as session:
-        saved_fact = await session.get(LongTermMemory, 1)
+        from sqlalchemy import select
+        stmt = select(LongTermMemory).where(LongTermMemory.user_id == user_id)
+        result = await session.execute(stmt)
+        saved_fact = result.scalars().first()
         assert saved_fact is not None
-        assert saved_fact.user_id == user_id
         assert saved_fact.fact == fact
 
 async def test_save_duplicate_fact():
