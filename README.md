@@ -121,3 +121,7 @@
 ├── personality_prompts.py # Промпты, определяющие личность "Маши"
 ├── prompts.py            # Основные системные промпты
 └── requirements.txt      # Список зависимостей
+
+# Пересобрать все контейнеры (будут установлены новые зависимости)
+docker-compose down
+docker-compose up --build -d

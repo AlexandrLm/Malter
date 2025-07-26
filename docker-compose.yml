@@ -1,39 +1,78 @@
-version: '3.8'
-
 services:
+  # Сервис API остается почти без изменений
   api:
     build:
       context: .
-      dockerfile: Dockerfile
+      # РЕКОМЕНДАЦИЯ: Используйте отдельный Dockerfile, например api.Dockerfile
+      dockerfile: Dockerfile 
     env_file:
       - .env
     ports:
       - "8000:8000"
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-    # volumes:
-    #   - .:/app # Раскомментируйте для локальной разработки
+    depends_on:
+      # API теперь будет ждать, пока миграции успешно завершатся
+      migration:
+        condition: service_completed_successfully
 
+  # Сервис бота тоже будет ждать завершения миграций
   bot:
     build:
       context: .
+      # РЕКОМЕНДАЦИЯ: Используйте отдельный Dockerfile, например bot.Dockerfile
       dockerfile: Dockerfile
     env_file:
       - .env
     depends_on:
-      - api
-    command: ["python", "-m", "bot.bot"]
-    # volumes:
-    #   - .:/app # Раскомментируйте для локальной разработки
+      migration:
+        condition: service_completed_successfully
+      redis:
+        # Теперь бот будет ждать, пока Redis будет полностью готов
+        condition: service_healthy
+    command: ["python", "-m", "bot"]
 
-# Пример секции для PostgreSQL, если вы захотите запустить его в Docker
-#  db:
-#    image: postgres:15
-#    volumes:
-#      - postgres_data:/var/lib/postgresql/data/
-#    env_file:
-#      - .env.db # Создайте этот файл с POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
-#    ports:
-#      - "5432:5432"
+  # ↓↓↓ НОВЫЙ СЕРВИС ДЛЯ МИГРАЦИЙ ↓↓↓
+  migration:
+    build:
+      context: .
+      dockerfile: Dockerfile.migration
+    env_file:
+      - .env
+    depends_on:
+      db:
+        # Миграции начнутся только после того, как база данных будет готова
+        condition: service_healthy
+    working_dir: /app
 
-# volumes:
-#   postgres_data:
+  redis:
+    image: redis:7.2.5-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      # ИСПРАВЛЕНО: Убрана попытка использовать несуществующий пароль
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    
+  db:
+    image: postgres:15.7-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

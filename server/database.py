@@ -1,5 +1,6 @@
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.dialects.postgresql import insert
 
 from config import DATABASE_URL
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory
@@ -20,20 +21,22 @@ async def get_profile(user_id: int) -> UserProfile | None:
         return result.scalars().first()
 
 async def create_or_update_profile(user_id: int, data: dict):
+    """
+    Атомарно создает или обновляет профиль пользователя, используя UPSERT.
+    Примечание: эта реализация специфична для PostgreSQL.
+    Для SQLite потребуется оставить старую логику "select-then-update".
+    """
     async with async_session_factory() as session:
-        stmt = select(UserProfile).where(UserProfile.user_id == user_id)
-        result = await session.execute(stmt)
-        profile = result.scalars().first()
+        # Создаем оператор insert
+        stmt = insert(UserProfile).values(user_id=user_id, **data)
         
-        if profile:
-            profile.name = data['name']
-            profile.occupation = data['occupation']
-            profile.hobby = data['hobby']
-            profile.place = data['place']
-        else:
-            profile = UserProfile(user_id=user_id, **data)
+        # Указываем, что делать при конфликте по уникальному полю user_id
+        stmt = stmt.on_conflict_do_update(
+            index_elements=['user_id'],  # Поле, которое вызывает конфликт
+            set_=data  # Обновляем поля из словаря data
+        )
         
-        session.add(profile)
+        await session.execute(stmt)
         await session.commit()
 
 async def delete_profile(user_id: int):

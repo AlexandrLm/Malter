@@ -1,10 +1,3 @@
-from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
-from alembic import context
-
 import os
 import sys
 from logging.config import fileConfig
@@ -26,11 +19,10 @@ from server.models import Base
 config = context.config
 
 # Устанавливаем URL для подключения к БД из нашего конфига
-config.set_main_option('sqlalchemy.url', DATABASE_URL)
+# config.set_main_option('sqlalchemy.url', DATABASE_URL)
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
-if config.config_file_name is not None:
+# Проверяем, что config_file_name существует перед использованием
+if config.config_file_name is not None and os.path.exists(config.config_file_name):
     fileConfig(config.config_file_name)
 
 # add your model's MetaData object here
@@ -42,7 +34,17 @@ target_metadata = Base.metadata
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
+# Получаем значения из переменных окружения
+postgres_user = os.getenv('POSTGRES_USER')
+postgres_password = os.getenv('POSTGRES_PASSWORD')
+postgres_db = os.getenv('POSTGRES_DB')
 
+if postgres_user and postgres_password and postgres_db:
+    config.set_main_option(
+        'sqlalchemy.url',
+        f'postgresql+asyncpg://{postgres_user}:{postgres_password}@db:5432/{postgres_db}'
+    )
+    
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 

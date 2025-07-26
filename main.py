@@ -2,12 +2,14 @@ import uvicorn
 import logging
 import os
 import asyncio
+import io
 from fastapi import FastAPI, HTTPException, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
+import json
 
 from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, get_chat_history
 from server.ai import generate_ai_response
@@ -16,8 +18,21 @@ from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate
 
 # --- Rate Limiting ---
 # Ключевая функция для rate limiter'а. Мы будем ограничивать по user_id.
-def get_limiter_key(request: Request):
-    # В chat_handler мы будем передавать user_id, здесь просто заглушка
+async def get_limiter_key(request: Request) -> str:
+    """
+    Извлекает user_id из тела POST-запроса для точного ограничения.
+    Если user_id не найден (например, для GET-запросов), возвращается к IP-адресу.
+    """
+    try:
+        # Пытаемся прочитать тело запроса как JSON
+        body = await request.json()
+        user_id = body.get("user_id")
+        if user_id:
+            return str(user_id)
+    except (json.JSONDecodeError, AttributeError):
+        # Если тело невалидно или это не POST-запрос, возвращаемся к IP
+        return get_remote_address(request)
+    # Возвращаемся к IP в качестве запасного варианта
     return get_remote_address(request)
 
 limiter = Limiter(key_func=get_limiter_key)
@@ -36,6 +51,12 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- Метрики Prometheus ---
+from starlette_prometheus import PrometheusMiddleware, metrics
+app.add_middleware(PrometheusMiddleware)
+app.add_route("/metrics", metrics)
+
 
 @app.get("/")
 async def read_root():
@@ -65,15 +86,17 @@ async def chat_handler(request: Request, chat: ChatRequest):
         voice_message_data = None
         if response_text.startswith('[VOICE]'):
             text_to_speak = response_text.replace('[VOICE]', '').strip()
-            output_filename = f"voice_message_{chat.user_id}.ogg"
-
-            success = await create_telegram_voice_message(text_to_speak, output_filename)
+            
+            # Создаем файловый объект в памяти вместо реального файла
+            voice_file_object = io.BytesIO()
+            
+            success = await create_telegram_voice_message(text_to_speak, voice_file_object)
 
             if success:
-                with open(output_filename, "rb") as f:
-                    voice_message_data = f.read()
-                os.remove(output_filename)
+                voice_file_object.seek(0)  # "Перематываем" в начало, чтобы прочитать данные
+                voice_message_data = voice_file_object.read()
             else:
+                # Если генерация не удалась, отправляем текстовый fallback
                 response_text = "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!"
 
         return ChatResponse(response_text=response_text, voice_message=voice_message_data)
@@ -108,27 +131,7 @@ async def delete_profile_handler(user_id: int):
     await delete_long_term_memory(user_id)
     return {"message": "Профиль и история чата успешно удалены"}
 
-# --- FSM для анкеты ---
-class FSMState(BaseModel):
-    state: str
-    data: dict = {}
-
-fsm_storage = {}
-
-@app.post("/fsm/state")
-async def set_fsm_state(request: FSMState):
-    fsm_storage[request.state] = request.data
-    return {"message": "Состояние установлено"}
-
-@app.get("/fsm/state/{user_id}")
-async def get_fsm_state(user_id: int):
-    return fsm_storage.get(user_id)
-
-@app.delete("/fsm/state/{user_id}")
-async def delete_fsm_state(user_id: int):
-    if user_id in fsm_storage:
-        del fsm_storage[user_id]
-    return {"message": "Состояние удалено"}
+# --- FSM для анкеты (удалено, т.к. теперь управляется aiogram и Redis) ---
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

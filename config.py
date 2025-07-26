@@ -5,14 +5,22 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = "http://api:8000"
 # Чтобы переключиться на PostgreSQL, просто закомментируйте строку для SQLite
 # и раскомментируйте строку для PostgreSQL, указав свои данные.
 
 # Вариант 1: SQLite (файл будет создан в той же папке)
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///profiles.db")
+# DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///profiles.db")
 # Вариант 2: PostgreSQL (нужно предварительно создать базу данных)
-# DATABASE_URL = "postgresql+asyncpg://user:password@localhost/db_name"
+
+# Используем переменные окружения напрямую
+DATABASE_URL = (
+    f"postgresql+asyncpg://"
+    f"{os.getenv('POSTGRES_USER', 'myuser')}:"
+    f"{os.getenv('POSTGRES_PASSWORD', 'Al02082003')}@"
+    f"{os.getenv('DB_HOST', 'db')}:5432/"
+    f"{os.getenv('POSTGRES_DB', 'malterdb')}"
+)
 
 MODEL_NAME = "gemini-2.5-flash-lite-preview-06-17"
 # MODEL_NAME = "gemini-2.5-flash"

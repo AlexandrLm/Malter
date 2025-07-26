@@ -3,6 +3,8 @@ import asyncio
 from functools import partial
 from google import genai
 from google.genai import types as genai_types
+from google.genai.errors import APIError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from prompts import BASE_SYSTEM_PROMPT
 from personality_prompts import PERSONALITIES
 from config import MODEL_NAME
@@ -117,17 +119,12 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             # print(contents)
             # print(system_instruction)
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL_NAME,
+            response = await call_gemini_api_with_retry(
+                user_id=user_id,
+                model_name=MODEL_NAME,
                 contents=contents,
-                config=genai_types.GenerateContentConfig(
-                    tools=[tools],
-                    system_instruction=system_instruction,
-                    thinking_config=genai_types.ThinkingConfig(
-                        thinking_budget=512
-                    )
-                ),
+                tools=tools,
+                system_instruction=system_instruction
             )
             logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{response}'")
 
@@ -179,8 +176,14 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 return final_response
 
             else:
-                logging.warning(f"Ответ от API для {user_id} не содержит ни текста, ни вызова функции. Причина: {candidate.finish_reason}")
-                final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+                finish_reason = candidate.finish_reason.name
+                logging.warning(f"Ответ от API для {user_id} не содержит текста. Причина: {finish_reason}")
+                if finish_reason == 'MAX_TOKENS':
+                    final_response = "Ой, я так увлеклась, что мысль не поместилась в одно сообщение. Спроси еще раз, я попробую ответить короче."
+                elif finish_reason == 'SAFETY':
+                    final_response = "Я не могу обсуждать эту тему, прости. Давай сменим тему?"
+                else:
+                    final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
                 await save_chat_message(user_id, 'model', final_response)
                 return final_response
 
@@ -190,3 +193,35 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)
         return "Произошла внутренняя ошибка. Попробуйте еще раз позже."
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10), # Экспоненциальная задержка
+    retry=retry_if_exception_type(APIError),
+    reraise=True
+)
+async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: list, tools: list, system_instruction: str):
+    """
+    Выполняет вызов к Gemini API с логикой повторных попыток.
+    """
+    logging.info(f"Попытка вызова Gemini API для пользователя {user_id}")
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=model_name,
+            contents=contents,
+            config=genai_types.GenerateContentConfig(
+                tools=[tools],
+                system_instruction=system_instruction,
+                thinking_config=genai_types.ThinkingConfig(
+                    thinking_budget=512
+                )
+            ),
+        )
+        return response
+    except APIError as e:
+        logging.warning(f"Ошибка Gemini API для пользователя {user_id}: {e}. Повторная попытка...")
+        raise
+    except Exception as e:
+        logging.error(f"Непредвиденная ошибка при вызове Gemini API для {user_id}: {e}", exc_info=True)
+        raise

@@ -5,7 +5,7 @@ __pycache__
 *.pyd
 .pytest_cache
 .env
-alembic.ini
-alembic/
 *.db
 *.db-journal
+.roo
+.kilocode
