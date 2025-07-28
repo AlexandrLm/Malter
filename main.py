@@ -39,7 +39,6 @@ limiter = Limiter(key_func=get_limiter_key)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Запускайте `alembic upgrade head` для применения миграций.
-    print("Сервер запускается. Убедитесь, что миграции Alembic применены.")
     yield
     print("Сервер выключается.")
 

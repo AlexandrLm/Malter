@@ -53,7 +53,7 @@ class ChatSummary(Base):
     __tablename__ = "chat_summaries"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     summary: Mapped[str] = mapped_column(nullable=False)
     last_message_id: Mapped[int] = mapped_column(nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

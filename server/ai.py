@@ -135,8 +135,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 logging.error(f"Ошибка обработки изображения для пользователя {user_id}: {e}", exc_info=True)
                 return "Ой, не могу посмотреть на твою картинку, что-то пошло не так."
 
-        history.append(genai_types.Content(role="user", parts=user_parts))
-        
+       
         tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
         
         available_functions = {
@@ -152,6 +151,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             # print(contents)
             # print(system_instruction)
+            
             response = await call_gemini_api_with_retry(
                 user_id=user_id,
                 model_name=MODEL_NAME,
@@ -248,8 +248,7 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
     """
     logging.info(f"Попытка вызова Gemini API для пользователя {user_id}")
     try:
-        response = await asyncio.to_thread(
-            client.models.generate_content,
+        response = await client.aio.models.generate_content(
             model=model_name,
             contents=contents,
             config=genai_types.GenerateContentConfig(
@@ -258,7 +257,7 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
                 thinking_config=genai_types.ThinkingConfig(
                     thinking_budget=512
                 )
-            ),
+            )
         )
         return response
     except APIError as e:

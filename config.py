@@ -25,7 +25,8 @@ MODEL_NAME = "gemini-2.5-flash-lite"
 # MODEL_NAME = "gemini-2.5-flash"
 # MODEL_NAME = "gemini-2.5-pro"
 
-SUMMARY_THRESHOLD = 20 # Количество сообщений для запуска суммирования
+SUMMARY_THRESHOLD = 26 # Количество сообщений для запуска суммирования
+MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, которые будут взяты для создания сводки (и последующего удаления)
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Необходимо установить TELEGRAM_BOT_TOKEN в .env файле")

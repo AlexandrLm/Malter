@@ -1,3 +1,4 @@
+from datetime import datetime
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert
@@ -168,15 +169,41 @@ async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
         )
         return result.scalars().all()
 
+# async def save_summary(user_id: int, summary_text: str, last_message_id: int):
+#     """Сохраняет новую сводку в базу данных."""
+#     async with async_session_factory() as session:
+#         summary = ChatSummary(
+#             user_id=user_id,
+#             summary=summary_text,
+#             last_message_id=last_message_id
+#         )
+#         session.add(summary)
+#         await session.commit()
+
 async def save_summary(user_id: int, summary_text: str, last_message_id: int):
-    """Сохраняет новую сводку в базу данных."""
+    """
+    Атомарно создает или обновляет сводку для пользователя (UPSERT).
+    Гарантирует, что у каждого пользователя будет только одна запись в таблице.
+    """
     async with async_session_factory() as session:
-        summary = ChatSummary(
-            user_id=user_id,
-            summary=summary_text,
-            last_message_id=last_message_id
+        # Данные для вставки или обновления
+        data = {
+            "summary": summary_text,
+            "last_message_id": last_message_id,
+            "timestamp": datetime.now() # Явно обновляем время
+        }
+        
+        # Создаем оператор insert
+        stmt = insert(ChatSummary).values(user_id=user_id, **data)
+        
+        # Указываем, что делать при конфликте по уникальному полю user_id
+        # Мы обновляем все поля из словаря `data`
+        stmt = stmt.on_conflict_do_update(
+            index_elements=['user_id'],  # Поле, которое вызывает конфликт
+            set_=data  # Обновляемые поля
         )
-        session.add(summary)
+        
+        await session.execute(stmt)
         await session.commit()
 
 async def delete_summarized_messages(user_id: int, last_message_id: int):
