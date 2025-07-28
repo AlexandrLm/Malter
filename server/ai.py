@@ -62,10 +62,10 @@ get_memories_function = {
 def generate_user_prompt(profile: UserProfile):
     """Генерирует часть системного промпта с информацией о пользователе."""
     return (
-        f"- Имя: {profile.name}.\n"
-        f"- Занимается: {profile.occupation}.\n"
-        f"- Любимое общее дело: {profile.hobby}.\n"
-        f"- Особенное место: {profile.place}.\n"
+        f"Имя: {profile.name}.\n"
+        # f"- Занимается: {profile.occupation}.\n"
+        # f"- Любимое общее дело: {profile.hobby}.\n"
+        # f"- Особенное место: {profile.place}.\n"
     )
 
 async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:
@@ -151,7 +151,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             # print(contents)
             # print(system_instruction)
-            
+
             response = await call_gemini_api_with_retry(
                 user_id=user_id,
                 model_name=MODEL_NAME,

@@ -169,17 +169,6 @@ async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
         )
         return result.scalars().all()
 
-# async def save_summary(user_id: int, summary_text: str, last_message_id: int):
-#     """Сохраняет новую сводку в базу данных."""
-#     async with async_session_factory() as session:
-#         summary = ChatSummary(
-#             user_id=user_id,
-#             summary=summary_text,
-#             last_message_id=last_message_id
-#         )
-#         session.add(summary)
-#         await session.commit()
-
 async def save_summary(user_id: int, summary_text: str, last_message_id: int):
     """
     Атомарно создает или обновляет сводку для пользователя (UPSERT).
