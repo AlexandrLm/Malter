@@ -1,5 +1,4 @@
 services:
-  # Сервис API остается почти без изменений
   api:
     build:
       context: .
@@ -31,7 +30,6 @@ services:
         condition: service_healthy
     command: ["python", "-m", "bot"]
 
-  # ↓↓↓ НОВЫЙ СЕРВИС ДЛЯ МИГРАЦИЙ ↓↓↓
   migration:
     build:
       context: .
@@ -52,7 +50,6 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      # ИСПРАВЛЕНО: Убрана попытка использовать несуществующий пароль
       test: ["CMD-SHELL", "redis-cli ping | grep PONG || exit 1"]
       interval: 10s
       timeout: 5s
