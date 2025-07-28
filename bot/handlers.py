@@ -199,31 +199,46 @@ async def process_onboarding(message: types.Message, state: FSMContext, client: 
 
 
 # --- Основной хендлер для текстовых сообщений ---
-@router.message(F.text)
+# --- Основной хендлер для текстовых и фото-сообщений ---
+@router.message(F.text | F.photo)
 async def handle_message(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
     if await state.get_state() is not None:
         await message.answer("Подожди, давай сначала я все вспомню...")
         return
-        
+
     user_id = message.from_user.id
-    
+    image_data_b64 = None
+
     try:
         await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
+        # Обработка изображения, если оно есть
+        if message.photo:
+            # Выбираем лучшее качество (последнее в списке)
+            photo = message.photo[-1]
+            # Скачиваем фото в память
+            photo_bytes = await message.bot.download(photo.file_id)
+            if photo_bytes:
+                image_data_b64 = base64.b64encode(photo_bytes.read()).decode('utf-8')
+
+        # Текст сообщения (или подпись к фото)
+        text = message.text or message.caption or ""
+
         payload = {
-            "user_id": message.from_user.id,
-            "message": message.text,
-            "timestamp": message.date.isoformat()
+            "user_id": user_id,
+            "message": text,
+            "timestamp": message.date.isoformat(),
+            "image_data": image_data_b64 # Добавляем base64 картинки
         }
-        
+
         response = await make_api_request(
             client,
             "post",
             "/chat",
             json=payload,
-            timeout=90.0
+            timeout=180.0 # Увеличиваем таймаут для обработки изображений
         )
-        
+
         data = response.json()
         voice_bytes_b64 = data.get("voice_message")
         if voice_bytes_b64:
@@ -236,3 +251,6 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logging.error(f"API connection error in handle_message for user {user_id} after retries: {e}")
         await message.answer("Милый, у меня связь пропала... Не вижу твое сообщение. Напиши, как только интернет появится.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in handle_message for user {user_id}: {e}", exc_info=True)
+        await message.answer("Ой, что-то пошло не так... Попробуй еще раз.")

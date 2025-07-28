@@ -1,6 +1,8 @@
 import logging
 import asyncio
 from functools import partial
+import base64
+import io
 from google.genai import types as genai_types
 from google.genai.errors import APIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -66,15 +68,17 @@ def generate_user_prompt(profile: UserProfile):
         f"- Особенное место: {profile.place}.\n"
     )
 
-async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime) -> str:
+async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:
     """
     Генерирует ответ AI с использованием `generate_content`, сохраняя и извлекая историю чата из БД.
+    Поддерживает обработку изображений.
     """
     logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
     if client is None:
         logging.error("Клиент Gemini не инициализирован.")
         return "Произошла критическая ошибка конфигурации. Попробуйте еще раз позже."
-        
+
+    uploaded_file = None
     try:
         profile = await get_profile(user_id)
         if not profile:
@@ -113,10 +117,27 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         # Форматируем и добавляем их в историю (без системного сообщения!)
         history = []
         for msg in unsummarized_messages:
-            history.append({"role": msg.role, "parts": [{"text": msg.content}]})
+            history.append(genai_types.Content(role=msg.role, parts=[genai_types.Part.from_text(text=msg.content)]))
+
+        # --- Подготовка контента для API ---
+        user_parts = [genai_types.Part.from_text(text=user_message)]
+        if image_data:
+            try:
+                # Декодируем base64 и создаем Part из байтов
+                image_bytes = base64.b64decode(image_data)
+                logging.info(f"Обработка изображения размером {len(image_bytes)} байт для пользователя {user_id}")
+                image_part = genai_types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type='image/jpeg'
+                )
+                user_parts.insert(0, image_part) # Вставляем картинку перед текстом
+            except Exception as e:
+                logging.error(f"Ошибка обработки изображения для пользователя {user_id}: {e}", exc_info=True)
+                return "Ой, не могу посмотреть на твою картинку, что-то пошло не так."
+
+        history.append(genai_types.Content(role="user", parts=user_parts))
         
         tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
-
         
         available_functions = {
             "save_long_term_memory": partial(save_long_term_memory, user_id),
@@ -168,15 +189,15 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 logging.info(f"Результат функции '{function_name}': {function_response_data}")
 
                 history.append(candidate.content)
-                history.append({
-                    "role": "function",
-                    "parts": [genai_types.Part(
+                history.append(genai_types.Content(
+                    role="function",
+                    parts=[genai_types.Part(
                         function_response=genai_types.FunctionResponse(
                             name=function_name,
                             response={"result": function_response_data},
                         )
                     )]
-                })
+                ))
                 
                 formatted_message = ""
                 continue
@@ -205,6 +226,15 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)
         return "Произошла внутренняя ошибка. Попробуйте еще раз позже."
+    finally:
+        # Гарантированное удаление файла после использования
+        if uploaded_file:
+            try:
+                logging.info(f"Удаление файла {uploaded_file.name} для пользователя {user_id}...")
+                await asyncio.to_thread(client.files.delete, name=uploaded_file.name)
+                logging.info(f"Файл {uploaded_file.name} успешно удален.")
+            except Exception as e:
+                logging.error(f"Не удалось удалить файл {uploaded_file.name}: {e}", exc_info=True)
 
 @retry(
     stop=stop_after_attempt(3),

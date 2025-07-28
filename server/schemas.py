@@ -5,6 +5,7 @@ class ChatRequest(BaseModel):
     user_id: int
     message: str
     timestamp: datetime
+    image_data: str | None = None
 
 
 class ChatResponse(BaseModel):

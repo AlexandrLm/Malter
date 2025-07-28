@@ -79,7 +79,12 @@ async def ready_check():
 @limiter.limit("10/minute")
 async def chat_handler(request: Request, chat: ChatRequest):
     try:
-        response_text = await generate_ai_response(chat.user_id, chat.message, chat.timestamp)
+        response_text = await generate_ai_response(
+            user_id=chat.user_id,
+            user_message=chat.message,
+            timestamp=chat.timestamp,
+            image_data=chat.image_data
+        )
 
         voice_message_data = None
         if response_text.startswith('[VOICE]'):
