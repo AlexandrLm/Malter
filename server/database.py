@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert
 
 from config import DATABASE_URL
-from server.models import Base, UserProfile, LongTermMemory, ChatHistory
+from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
 
 # Создаем асинхронный "движок" и фабрику сессий
 async_engine = create_async_engine(DATABASE_URL)
@@ -108,11 +108,18 @@ async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
         return {"memories": formatted_memories}
 
 async def save_chat_message(user_id: int, role: str, content: str):
-    """Сохраняет сообщение в историю чата."""
+    """Сохраняет сообщение в историю чата и запускает процесс суммирования."""
     async with async_session_factory() as session:
         message = ChatHistory(user_id=user_id, role=role, content=content)
         session.add(message)
         await session.commit()
+    
+    # После сохранения сообщения, пытаемся сгенерировать сводку.
+    # Это можно сделать в фоновом режиме, чтобы не блокировать основной поток.
+    # Например, с помощью asyncio.create_task()
+    from server.summarizer import generate_summary
+    import asyncio
+    asyncio.create_task(generate_summary(user_id))
 
 async def get_chat_history(user_id: int, limit: int = 10) -> list[dict]:
     """Извлекает историю чата для пользователя."""
@@ -131,3 +138,55 @@ async def get_chat_history(user_id: int, limit: int = 10) -> list[dict]:
             for msg in messages
         ]
         return history
+
+async def get_latest_summary(user_id: int) -> ChatSummary | None:
+    """Извлекает самую последнюю сводку для пользователя."""
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(ChatSummary)
+            .where(ChatSummary.user_id == user_id)
+            .order_by(ChatSummary.timestamp.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
+    """
+    Извлекает все сообщения пользователя, которые еще не были включены в сводку.
+    """
+    latest_summary = await get_latest_summary(user_id)
+    last_message_id = latest_summary.last_message_id if latest_summary else 0
+
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(ChatHistory)
+            .where(
+                ChatHistory.user_id == user_id,
+                ChatHistory.id > last_message_id
+            )
+            .order_by(ChatHistory.timestamp.asc())
+        )
+        return result.scalars().all()
+
+async def save_summary(user_id: int, summary_text: str, last_message_id: int):
+    """Сохраняет новую сводку в базу данных."""
+    async with async_session_factory() as session:
+        summary = ChatSummary(
+            user_id=user_id,
+            summary=summary_text,
+            last_message_id=last_message_id
+        )
+        session.add(summary)
+        await session.commit()
+
+async def delete_summarized_messages(user_id: int, last_message_id: int):
+    """Удаляет сообщения, которые уже вошли в сводку."""
+    async with async_session_factory() as session:
+        await session.execute(
+            delete(ChatHistory)
+            .where(
+                ChatHistory.user_id == user_id,
+                ChatHistory.id <= last_message_id
+            )
+        )
+        await session.commit()

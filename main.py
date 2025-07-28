@@ -17,7 +17,6 @@ from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory
 
 # --- Rate Limiting ---
-# Ключевая функция для rate limiter'а. Мы будем ограничивать по user_id.
 async def get_limiter_key(request: Request) -> str:
     """
     Извлекает user_id из тела POST-запроса для точного ограничения.
@@ -39,7 +38,6 @@ limiter = Limiter(key_func=get_limiter_key)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Теперь база данных управляется миграциями Alembic.
     # Запускайте `alembic upgrade head` для применения миграций.
     print("Сервер запускается. Убедитесь, что миграции Alembic применены.")
     yield
@@ -131,7 +129,6 @@ async def delete_profile_handler(user_id: int):
     await delete_long_term_memory(user_id)
     return {"message": "Профиль и история чата успешно удалены"}
 
-# --- FSM для анкеты (удалено, т.к. теперь управляется aiogram и Redis) ---
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

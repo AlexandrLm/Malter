@@ -14,7 +14,8 @@ from server.database import (
     save_long_term_memory,
     get_long_term_memories,
     save_chat_message,
-    get_chat_history
+    get_latest_summary,
+    get_unsummarized_messages
 )
 from datetime import datetime
 import pytz
@@ -99,9 +100,31 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         user_context = generate_user_prompt(profile)
         system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
         
-        history = await get_chat_history(user_id, limit=10)
+        user_context = generate_user_prompt(profile)
+        # Изначальный системный промпт
+        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
+
+        # Получаем сводку и ДОБАВЛЯЕМ ее к системному промпту, а не в историю
+        latest_summary = await get_latest_summary(user_id)
+        if latest_summary:
+            summary_context = (
+                "\n\n### Контекст предыдущего разговора (краткая сводка):\n"
+                "Это краткая сводка вашего предыдущего долгого разговора. "
+                "Используй ее, чтобы помнить контекст, но не ссылайся на нее прямо в ответе.\n"
+                f"Сводка: {latest_summary.summary}"
+            )
+            system_instruction += summary_context # Добавляем к основной инструкции
+
+        # Получаем сообщения, которые еще не вошли в сводку
+        unsummarized_messages = await get_unsummarized_messages(user_id)
+
+        # Форматируем и добавляем их в историю (без системного сообщения!)
+        history = []
+        for msg in unsummarized_messages:
+            history.append({"role": msg.role, "parts": [{"text": msg.content}]})
         
         tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
+
         
         available_functions = {
             "save_long_term_memory": partial(save_long_term_memory, user_id),
@@ -112,10 +135,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         iteration_count = 0
         while iteration_count < max_iterations:
             iteration_count += 1
-            if not formatted_message:
-                contents = history
-            else:
-                contents = history #+ [{"role": "user", "parts": [{"text": formatted_message}]}]
+            contents = history
 
             # print(contents)
             # print(system_instruction)
@@ -123,7 +143,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 user_id=user_id,
                 model_name=MODEL_NAME,
                 contents=contents,
-                tools=tools,
+                tools=[tools],
                 system_instruction=system_instruction
             )
             logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{response}'")
@@ -211,7 +231,7 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
             model=model_name,
             contents=contents,
             config=genai_types.GenerateContentConfig(
-                tools=[tools],
+                tools=tools,
                 system_instruction=system_instruction,
                 thinking_config=genai_types.ThinkingConfig(
                     thinking_budget=512

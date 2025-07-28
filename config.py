@@ -22,7 +22,7 @@ DATABASE_URL = (
     f"{os.getenv('POSTGRES_DB', 'malterdb')}"
 )
 
-MODEL_NAME = "gemini-2.5-flash-lite-preview-06-17"
+MODEL_NAME = "gemini-2.5-flash-lite"
 # MODEL_NAME = "gemini-2.5-flash"
 # MODEL_NAME = "gemini-2.5-pro"
 

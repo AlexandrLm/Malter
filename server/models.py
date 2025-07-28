@@ -48,3 +48,16 @@ class ChatHistory(Base):
    __table_args__ = (
        Index('idx_chat_history_user_id_timestamp', "user_id", "timestamp"),
    )
+
+class ChatSummary(Base):
+    __tablename__ = "chat_summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    summary: Mapped[str] = mapped_column(nullable=False)
+    last_message_id: Mapped[int] = mapped_column(nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index('idx_chat_summary_user_id_timestamp', "user_id", "timestamp"),
+    )
