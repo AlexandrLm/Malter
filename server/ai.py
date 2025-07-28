@@ -1,13 +1,12 @@
 import logging
 import asyncio
 from functools import partial
-from google import genai
 from google.genai import types as genai_types
 from google.genai.errors import APIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from prompts import BASE_SYSTEM_PROMPT
 from personality_prompts import PERSONALITIES
-from config import MODEL_NAME
+from config import MODEL_NAME, GEMINI_CLIENT
 from server.database import (
     get_profile,
     UserProfile,
@@ -22,11 +21,7 @@ import pytz
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-try:
-    client = genai.Client()
-except Exception as e:
-    logging.critical(f"Не удалось инициализировать Gemini Client: {e}")
-    client = None
+client = GEMINI_CLIENT
 
 add_memory_function = {
     "name": "save_long_term_memory",
@@ -100,9 +95,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         user_context = generate_user_prompt(profile)
         system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
         
-        user_context = generate_user_prompt(profile)
-        # Изначальный системный промпт
-        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
 
         # Получаем сводку и ДОБАВЛЯЕМ ее к системному промпту, а не в историю
         latest_summary = await get_latest_summary(user_id)

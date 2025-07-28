@@ -3,10 +3,9 @@
 """
 Модуль для создания и управления сводками (summaries) диалогов.
 """
-import os
 import asyncio
-from google import genai
 from google.genai import types
+from config import GEMINI_CLIENT, SUMMARY_THRESHOLD
 from server.database import async_session_factory, get_unsummarized_messages, save_summary, delete_summarized_messages, get_latest_summary
 from server.models import ChatHistory, ChatSummary
 
@@ -40,7 +39,7 @@ CUMULATIVE_SUMMARY_PROMPT = (
 
 
 # Настраиваем Gemini API
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = GEMINI_CLIENT
 
 async def generate_summary(user_id: int) -> str | None:
     """
@@ -50,7 +49,7 @@ async def generate_summary(user_id: int) -> str | None:
     messages = await get_unsummarized_messages(user_id)
 
     # Устанавливаем порог для создания сводки (например, 20 сообщений)
-    if len(messages) < 20:
+    if len(messages) < SUMMARY_THRESHOLD:
         return None
 
     # 2. Получаем предыдущую сводку
@@ -67,11 +66,11 @@ async def generate_summary(user_id: int) -> str | None:
     else:
         prompt = INITIAL_SUMMARY_PROMPT.format(chat_history=new_messages_text)
 
-    # 4. Вызываем Gemini для генерации сводки
+    # 4. Вызываем gemma для генерации сводки
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemma-3-27b-it", # Используем быструю модель для суммирования
+            model="gemma-3-27b-it",
             contents=prompt,
         )
         summary_text = response.text

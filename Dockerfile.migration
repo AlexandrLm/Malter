@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Установка зависимостей
 COPY requirements.txt .
-RUN pip install --no-cache-dir alembic asyncpg psycopg2-binary python-dotenv
+RUN pip install --no-cache-dir --retries 5 --timeout 60 -r requirements.txt
 
 # Копируем необходимые файлы
 COPY alembic.ini .
