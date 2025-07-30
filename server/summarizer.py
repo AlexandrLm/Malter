@@ -5,115 +5,120 @@
 """
 import asyncio
 import logging
+import json
+from pydantic import BaseModel, Field
 from google.genai import types
 from config import GEMINI_CLIENT, SUMMARY_THRESHOLD, MESSAGES_TO_SUMMARIZE_COUNT
-from server.database import async_session_factory, get_unsummarized_messages, save_summary, delete_summarized_messages, get_latest_summary
+from server.database import get_unsummarized_messages, save_summary, delete_summarized_messages, get_profile, create_or_update_profile
 from server.models import ChatHistory, ChatSummary
+from server.relationship_logic import check_for_level_up
 
-# Промпт для создания ПЕРВОЙ сводки
-INITIAL_SUMMARY_PROMPT = (
-    "Твоя задача — проанализировать предоставленный диалог и составить краткую, но исчерпывающую сводку на русском языке. "
-    "Сводка должна быть написана в нейтральном тоне от третьего лица (например, 'пользователь спросил...', 'модель ответила...'). "
-    "Представь, что ты готовишь краткий отчет для человека, который хочет быстро понять суть разговора, не читая его целиком."
-    "\n\n"
-    "## Ключевые моменты для включения в сводку:"
-    "1.  **Основные темы:** О чем в целом шла речь? (например, 'Обсуждали планы на выходные, выбор фильма и проблемы с проектом на работе')."
-    "2.  **Важные факты и детали:** Новые факты о пользователе, конкретные даты, имена, решения. (например, 'Пользователь упомянул, что его кота зовут Мурзик', 'Решили встретиться в субботу в 18:00')."
-    "3.  **Эмоциональный фон:** Общее настроение диалога. Был ли пользователь рад, расстроен, задумчив? (например, 'Пользователь был воодушевлен предстоящей поездкой', 'Диалог носил шутливый характер')."
-    "4.  **Ключевые вопросы и ответы:** Зафиксируй основные вопросы пользователя и полученные на них ответы."
-    "\n"
-    "## Требования к стилю:"
-    "-   **Краткость:** Избегай дословных цитат. Пересказывай суть."
-    "-   **Объективность:** Пиши отстраненно, как наблюдатель."
-    "-   **Полнота:** Не упускай важные детали, которые могут понадобиться для продолжения диалога в будущем."
-    "\n\n"
-    "ДИАЛОГ ДЛЯ АНАЛИЗА:\n"
-    "------\n"
+JSON_SUMMARY_AND_ANALYSIS_PROMPT = (
+    "Твоя задача — выступить в роли психолога-аналитика и внимательно изучить предоставленный диалог. "
+    "На основе анализа ты должен вернуть СТРОГО валидный JSON-объект без каких-либо лишних символов или текста до или после него. "
+    "JSON должен иметь следующую структуру:\n"
+    "{{\n"
+    '  "new_summary": "Краткая, но исчерпывающая сводка диалога.",\n'
+    '  "relationship_analysis": {{\n'
+    '    "quality_score": <число от -5 до +10>,\n'
+    '    "key_insight": "Ключевой вывод о динамике отношений."\n'
+    "  }}\n"
+    "}}\n\n"
+    "## Инструкции по заполнению полей:\n\n"
+    "### 1. `new_summary` (Сводка диалога):\n"
+    "-   **Стиль:** Нейтральный, от третьего лица ('пользователь поделился...', 'модель предложила...').\n"
+    "-   **Содержание:**\n"
+    "    -   **Основные темы:** О чем шла речь? (например, 'Обсуждали проблемы на работе пользователя и планировали совместный просмотр фильма').\n"
+    "    -   **Ключевые факты:** Новая информация о пользователе, его чувства, принятые решения. (например, 'Пользователь расстроен из-за ссоры с коллегой', 'Решили посмотреть комедию в субботу').\n"
+    "    -   **Эмоциональный фон:** Общее настроение диалога (например, 'Диалог был напряженным, но закончился на позитивной ноте').\n"
+    "-   **Цель:** Сводка должна помочь быстро понять контекст разговора, не читая его целиком.\n\n"
+    "### 2. `relationship_analysis` (Анализ отношений):\n"
+    "#### `quality_score` (Оценка качества общения):\n"
+    "-   Это числовая оценка глубины и качества коммуникации в данном фрагменте диалога.\n"
+    "-   **+10:** Очень глубокий, доверительный и эмоционально насыщенный диалог. Пользователь делится чем-то важным, модель оказывает поддержку.\n"
+    "-   **+5:** Позитивный, дружелюбный диалог. Обмен мнениями, шутки, поддержка.\n"
+    "-   **0:** Нейтральный или поверхностный обмен информацией. (например, 'какая погода?').\n"
+    "-   **-2:** Небольшое недопонимание, холодность в общении.\n"
+    "-   **-5:** Конфликт, явное раздражение или негатив со стороны пользователя.\n"
+    "#### `key_insight` (Ключевой вывод):\n"
+    "-   Краткий, но емкий вывод о том, что этот диалог говорит об отношениях между пользователем и моделью.\n"
+    "-   **Примеры:**\n"
+    "    -   'Пользователь начинает больше доверять модели, делясь личными переживаниями о работе.'\n"
+    "    -   'Отношения становятся более теплыми и неформальными, появляются общие шутки.'\n"
+    "    -   'Возникло небольшое недопонимание, но его удалось разрешить к концу диалога.'\n\n"
+    "--- ДИАЛОГ ДЛЯ АНАЛИЗА ---\n"
     "{chat_history}\n"
-    "------\n\n"
-    "КРАТКАЯ СВОДКА ДИАЛОГА:"
-)
-
-# Промпт для ОБНОВЛЕНИЯ существующей сводки
-CUMULATIVE_SUMMARY_PROMPT = (
-    "Твоя задача — обновить существующую сводку диалога, интегрировав в нее информацию из новых сообщений. "
-    "Итоговая сводка должна стать единым, цельным документом, полностью заменяющим старый. Сохрани всю важную информацию из предыдущей сводки и дополни ее новыми данными."
-    "\n\n"
-    "## Инструкции:"
-    "1.  **Проанализируй 'ПРЕДЫДУЩУЮ СВОДКУ'**: Пойми основной контекст беседы до текущего момента."
-    "2.  **Изучи 'НОВЫЕ СООБЩЕНИЯ'**: Определи, как они развивают, изменяют или дополняют диалог."
-    "3.  **Создай 'ОБНОВЛЕННУЮ И ПОЛНУЮ СВОДКУ'**: "
-    "   -   Объедини старую и новую информацию в связный рассказ от третьего лица."
-    "   -   Если новая информация уточняет или отменяет старую, отрази это. (например, 'Изначально планировали встречу в субботу, но перенесли на воскресенье')."
-    "   -   Придерживайся тех же принципов: фиксируй ключевые факты, темы, эмоциональный фон и решения."
-    "\n\n"
-    "ПРЕДЫДУЩАЯ СВОДКА:\n"
-    "------\n"
-    "{previous_summary}\n"
-    "------\n\n"
-    "НОВЫЕ СООБЩЕНИЯ:\n"
-    "------\n"
-    "{new_messages}\n"
-    "------\n\n"
-    "ОБНОВЛЕННАЯ И ПОЛНАЯ СВОДКА ДИАЛОГА:"
+    "--------------------------\n\n"
+    "ВАЛИДНЫЙ JSON-ОТВЕТ:"
 )
 
 # Настраиваем Gemini API
 client = GEMINI_CLIENT
 
-async def generate_summary(user_id: int) -> str | None:
+# --- Pydantic схемы для надежного парсинга JSON ---
+class RelationshipAnalysis(BaseModel):
+    quality_score: int = Field(description="Оценка качества общения от -5 до +10.")
+    key_insight: str = Field(description="Ключевой вывод об отношениях.")
+
+class SummaryAndAnalysisResponse(BaseModel):
+    new_summary: str = Field(description="Краткая сводка диалога.")
+    relationship_analysis: RelationshipAnalysis
+
+async def generate_summary_and_analyze(user_id: int) -> str | None:
     """
-    Генерирует и сохраняет новую накопительную сводку для пользователя,
-    оставляя "буфер" из недавних сообщений.
+    Генерирует сводку, анализирует отношения и обновляет профиль пользователя.
     """
-    # 1. Получаем ВСЕ сообщения, которые еще не вошли в сводку
     all_unsummarized_messages = await get_unsummarized_messages(user_id)
 
-    # 2. Проверяем, достигнут ли порог для ЗАПУСКА суммирования
     if len(all_unsummarized_messages) < SUMMARY_THRESHOLD:
-        logging.info(f"Недостаточно сообщений для сводки у user_id {user_id}. Накоплено: {len(all_unsummarized_messages)}/{SUMMARY_THRESHOLD}.")
+        logging.info(f"Недостаточно сообщений для анализа у user_id {user_id}.")
         return None
-    
-    # 3. Берем для обработки только нужное количество сообщений с начала списка
-    messages_to_summarize = all_unsummarized_messages[:MESSAGES_TO_SUMMARIZE_COUNT]
-    
-    # 4. Получаем предыдущую сводку (если она есть)
-    latest_summary = await get_latest_summary(user_id)
-    
-    # 5. Форматируем историю для промпта, используя только `messages_to_summarize`
-    new_messages_text = "\n".join([f"{msg.role}: {msg.content}" for msg in messages_to_summarize])
-    
-    if latest_summary:
-        prompt = CUMULATIVE_SUMMARY_PROMPT.format(
-            previous_summary=latest_summary.summary,
-            new_messages=new_messages_text
-        )
-    else:
-        prompt = INITIAL_SUMMARY_PROMPT.format(chat_history=new_messages_text)
 
-    # 6. Вызываем Gemini для генерации сводки
+    messages_to_analyze = all_unsummarized_messages[:MESSAGES_TO_SUMMARIZE_COUNT]
+    chat_history_text = "\n".join([f"{msg.role}: {msg.content}" for msg in messages_to_analyze])
+
+    prompt = JSON_SUMMARY_AND_ANALYSIS_PROMPT.format(chat_history=chat_history_text)
+
     try:
+        # Используем Gemma-3 и убираем response_schema
         response = await client.aio.models.generate_content(
-                                    model="gemma-3-27b-it", # Вы можете поменять модель на свою
-                                    contents=prompt
-                                    )
-        summary_text = response.text.strip()
+            model="gemma-3-27b-it",
+            contents=prompt
+        )
+        
+        # Возвращаемся к ручному парсингу JSON с усиленным логированием
+        try:
+            # Очищаем ответ от блоков кода Markdown
+            cleaned_text = response.text.strip()
+            if cleaned_text.startswith("```json"):
+                cleaned_text = cleaned_text[7:]
+            if cleaned_text.endswith("```"):
+                cleaned_text = cleaned_text[:-3]
+            
+            analysis_data = json.loads(cleaned_text)
+        except json.JSONDecodeError as e:
+            logging.error(f"Критическая ошибка парсинга JSON от Gemma-3 для user_id {user_id}: {e}\n--- ОТВЕТ МОДЕЛИ ---\n{response.text}\n--------------------")
+            return None # Прерываем выполнение, если JSON невалидный
+
+        new_summary = analysis_data.get("new_summary")
+        relationship_analysis = analysis_data.get("relationship_analysis", {})
+        quality_score = relationship_analysis.get("quality_score", 0)
+
+        profile = await get_profile(user_id)
+        if profile:
+            await create_or_update_profile(user_id, {
+                "relationship_score": profile.relationship_score + quality_score
+            })
+
+        last_processed_message_id = messages_to_analyze[-1].id
+        await save_summary(user_id, new_summary, last_processed_message_id)
+        await delete_summarized_messages(user_id, last_processed_message_id)
+
+        await check_for_level_up(user_id)
+
+        logging.info(f"Анализ для user_id {user_id} завершен. Очки: {quality_score}.")
+        return new_summary
+
     except Exception as e:
-        logging.error(f"Ошибка при генерации сводки для user_id {user_id}: {e}")
+        logging.error(f"Ошибка при анализе для user_id {user_id}: {e}")
         return None
-
-    # 7. Определяем ID последнего обработанного сообщения
-    last_processed_message_id = messages_to_summarize[-1].id
-
-    # 8. Сохраняем/обновляем сводку, указывая правильный ID
-    await save_summary(user_id, summary_text, last_processed_message_id)
-    
-    # 9. Удаляем только те сообщения, которые вошли в сводку
-    await delete_summarized_messages(user_id, last_processed_message_id)
-    
-    logging.info(
-        f"Создана/обновлена сводка для user_id {user_id}. "
-        f"Обработано и удалено: {len(messages_to_summarize)} сообщений. "
-        f"Осталось в истории: {len(all_unsummarized_messages) - len(messages_to_summarize)} сообщений."
-    )
-    return summary_text

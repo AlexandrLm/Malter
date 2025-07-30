@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
 API_BASE_URL = "http://api:8000"
 # Чтобы переключиться на PostgreSQL, просто закомментируйте строку для SQLite
 # и раскомментируйте строку для PostgreSQL, указав свои данные.

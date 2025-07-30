@@ -9,6 +9,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from prompts import BASE_SYSTEM_PROMPT
 from personality_prompts import PERSONALITIES
 from config import MODEL_NAME, GEMINI_CLIENT
+from server.relationship_config import RELATIONSHIP_LEVELS_CONFIG
 from server.database import (
     get_profile,
     UserProfile,
@@ -61,8 +62,10 @@ get_memories_function = {
 
 def generate_user_prompt(profile: UserProfile):
     """Генерирует часть системного промпта с информацией о пользователе."""
+    relationship_level = RELATIONSHIP_LEVELS_CONFIG.get(profile.relationship_level, {}).get("prompt_context", "")
     return (
         f"Имя: {profile.name}.\n"
+        f"ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ: {relationship_level}.\n"
         # f"- Занимается: {profile.occupation}.\n"
         # f"- Любимое общее дело: {profile.hobby}.\n"
         # f"- Особенное место: {profile.place}.\n"
@@ -97,14 +100,19 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         await save_chat_message(user_id, 'user', formatted_message)
 
         user_context = generate_user_prompt(profile)
+        
+        # Получаем контекст отношений
+        # relationship_level = profile.relationship_level
+        # relationship_context = RELATIONSHIP_LEVELS_CONFIG.get(relationship_level, {}).get("prompt_context", "")
+        
         system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
+        # system_instruction += f"\n\n# ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ\n{relationship_context}"
         
 
         # Получаем сводку и ДОБАВЛЯЕМ ее к системному промпту, а не в историю
         latest_summary = await get_latest_summary(user_id)
         if latest_summary:
             summary_context = (
-                "\n\n### Контекст предыдущего разговора (краткая сводка):\n"
                 "Это краткая сводка вашего предыдущего долгого разговора. "
                 "Используй ее, чтобы помнить контекст, но не ссылайся на нее прямо в ответе.\n"
                 f"Сводка: {latest_summary.summary}"
@@ -119,11 +127,9 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         for msg in unsummarized_messages:
             history.append(genai_types.Content(role=msg.role, parts=[genai_types.Part.from_text(text=msg.content)]))
 
-        # --- Подготовка контента для API ---
         user_parts = [genai_types.Part.from_text(text=user_message)]
         if image_data:
             try:
-                # Декодируем base64 и создаем Part из байтов
                 image_bytes = base64.b64decode(image_data)
                 logging.info(f"Обработка изображения размером {len(image_bytes)} байт для пользователя {user_id}")
                 image_part = genai_types.Part.from_bytes(
@@ -149,8 +155,8 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             iteration_count += 1
             contents = history
 
-            # print(contents)
-            # print(system_instruction)
+            print(contents)
+            print(system_instruction)
 
             response = await call_gemini_api_with_retry(
                 user_id=user_id,
@@ -202,22 +208,29 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 formatted_message = ""
                 continue
             
-            elif response.text:
-                final_response = response.text.strip()
+            else:
+                # Этот блок теперь обрабатывает и response.text, и другие причины завершения
+                final_response = ""
+                if response.text:
+                    final_response = response.text.strip()
+                else:
+                    finish_reason = candidate.finish_reason.name
+                    logging.warning(f"Ответ от API для {user_id} не содержит текста. Причина: {finish_reason}")
+                    if finish_reason == 'MAX_TOKENS':
+                        final_response = "Ой, я так увлеклась, что мысль не поместилась в одно сообщение. Спроси еще раз, я попробую ответить короче."
+                    elif finish_reason == 'SAFETY':
+                        final_response = "Я не могу обсуждать эту тему, прости. Давай сменим тему?"
+                    else:
+                        final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+
+                # --- Единая точка сохранения и запуска анализа ---
                 logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
                 await save_chat_message(user_id, 'model', final_response)
-                return final_response
+                
+                from server.summarizer import generate_summary_and_analyze
+                asyncio.create_task(generate_summary_and_analyze(user_id))
+                # --------------------------------------------------
 
-            else:
-                finish_reason = candidate.finish_reason.name
-                logging.warning(f"Ответ от API для {user_id} не содержит текста. Причина: {finish_reason}")
-                if finish_reason == 'MAX_TOKENS':
-                    final_response = "Ой, я так увлеклась, что мысль не поместилась в одно сообщение. Спроси еще раз, я попробую ответить короче."
-                elif finish_reason == 'SAFETY':
-                    final_response = "Я не могу обсуждать эту тему, прости. Давай сменим тему?"
-                else:
-                    final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
-                await save_chat_message(user_id, 'model', final_response)
                 return final_response
 
         logging.warning(f"Достигнут лимит итераций ({max_iterations}) для пользователя {user_id}.")

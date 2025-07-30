@@ -140,6 +140,50 @@ async def command_reset(message: types.Message, state: FSMContext, client: httpx
         logging.error(f"API connection error in /reset for user {user_id} after retries: {e}")
         await message.answer("Телефон глючит, не могу ничего удалить... Попробуй позже, пожалуйста.")
 
+@router.message(Command("status"))
+async def command_status(message: types.Message, client: httpx.AsyncClient):
+    """Показывает пользователю его текущий статус подписки."""
+    user_id = message.from_user.id
+    try:
+        response = await make_api_request(client, "get", f"/profile/status/{user_id}")
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                plan = data['subscription_plan']
+                expires = data['subscription_expires']
+                count = data['daily_message_count']
+                limit = 50 # Значение из config.py
+                
+                status_text = f"Твой тариф: *{plan.capitalize()}*\n"
+                if plan == 'premium' and expires:
+                    status_text += f"Подписка действует до: {expires.split('T')[0]}\n"
+                elif plan == 'free':
+                    status_text += f"Сообщений сегодня: {count}/{limit}\n"
+                    status_text += "Премиум-пользователи не имеют ограничений по сообщениям и получают доступ к продвинутым функциям!"
+                
+                await message.answer(status_text, parse_mode='Markdown')
+            else:
+                await message.answer("Профиль не найден. Пожалуйста, используй /start.")
+        else:
+            await message.answer("Не удалось получить статус. Попробуй позже.")
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logging.error(f"API connection error in /status for user {user_id} after retries: {e}")
+        await message.answer("Ой, у меня что-то с интернетом... Попробуй чуть позже.")
+
+@router.message(Command("premium"))
+async def command_premium(message: types.Message):
+    """Показывает информацию о премиум-подписке."""
+    premium_info = (
+        "✨ *Премиум-подписка MashaGPT* ✨\n\n"
+        "Разблокируй все возможности общения!\n\n"
+        " Unlimited общение без дневных лимитов.\n"
+        " 🧠 Продвинутую память (суммаризация диалогов).\n"
+        " 📷 Возможность отправлять фото и получать комментарии.\n"
+        " 🎙️ Голосовые сообщения от Маши.\n"
+        " 💬 Приоритет в обработке запросов.\n\n"
+        "Сейчас эта функция в разработке. Следи за обновлениями!"
+    )
+    await message.answer(premium_info, parse_mode='Markdown')
 
 # --- Единый хендлер для всей анкеты ---
 @router.message(ProfileStates.onboarding)
@@ -198,7 +242,6 @@ async def process_onboarding(message: types.Message, state: FSMContext, client: 
             await message.answer("Ой, не могу сохранить... что-то с телефоном. Давай попробуем позже, нажми /reset.")
 
 
-# --- Основной хендлер для текстовых сообщений ---
 # --- Основной хендлер для текстовых и фото-сообщений ---
 @router.message(F.text | F.photo)
 async def handle_message(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
@@ -211,7 +254,6 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
 
     try:
         await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-
         # Обработка изображения, если оно есть
         if message.photo:
             # Выбираем лучшее качество (последнее в списке)

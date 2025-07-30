@@ -98,7 +98,6 @@ async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
             {
                 "fact": mem.fact,
                 "category": mem.category,
-                # Преобразуем timestamp в строку, чтобы он был JSON-сериализуемым
                 "timestamp": str(mem.timestamp) 
             }
             for mem in memories
@@ -109,18 +108,11 @@ async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
         return {"memories": formatted_memories}
 
 async def save_chat_message(user_id: int, role: str, content: str):
-    """Сохраняет сообщение в историю чата и запускает процесс суммирования."""
+    """Сохраняет одно сообщение в историю чата."""
     async with async_session_factory() as session:
         message = ChatHistory(user_id=user_id, role=role, content=content)
         session.add(message)
         await session.commit()
-    
-    # После сохранения сообщения, пытаемся сгенерировать сводку.
-    # Это можно сделать в фоновом режиме, чтобы не блокировать основной поток.
-    # Например, с помощью asyncio.create_task()
-    from server.summarizer import generate_summary
-    import asyncio
-    asyncio.create_task(generate_summary(user_id))
 
 async def get_chat_history(user_id: int, limit: int = 10) -> list[dict]:
     """Извлекает историю чата для пользователя."""
