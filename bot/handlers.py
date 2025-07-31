@@ -32,18 +32,10 @@ class ProfileStates(StatesGroup):
 ONBOARDING_STEPS = {
     'name': {
         'question': "Ой, привет... Кажется, я немного заработалась с учебой и все вылетело из головы...\n\nДавай я поспрашиваю, чтобы освежить память, хорошо?\n\nКак мне тебя лучше называть?",
-        'next_step': 'occupation',
+        'next_step': 'gender',
     },
-    'occupation': {
-        'question': "Точно, {}... Вспомнила) А напомни, чем ты сейчас занимаешься, родной?",
-        'next_step': 'hobby',
-    },
-    'hobby': {
-        'question': "Поняла... А что мы с тобой больше всего любили делать вместе?",
-        'next_step': 'place',
-    },
-    'place': {
-        'question': "Дааа... точно. А было у нас какое-то особенное место в городе?",
+    'gender': {
+        'question': "Хорошо, {}. А ты мальчик или девочка? Мне это нужно, чтобы правильно к тебе обращаться.",
         'next_step': 'city',
     },
     'city': {
@@ -214,7 +206,7 @@ async def process_onboarding(message: types.Message, state: FSMContext, client: 
         step_info = ONBOARDING_STEPS[next_question_key]
         question = step_info['question']
         
-        if next_question_key == 'occupation':
+        if next_question_key == 'gender':
             current_user_data = await state.get_data()
             question = question.format(current_user_data.get('name', '...'))
 

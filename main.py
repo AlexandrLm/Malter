@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, get_chat_history
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_chat_history
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory
@@ -131,6 +131,7 @@ async def delete_profile_handler(user_id: int):
     await delete_profile(user_id)
     await delete_chat_history(user_id)
     await delete_long_term_memory(user_id)
+    await delete_summary(user_id)
     return {"message": "Профиль и история чата успешно удалены"}
 
 

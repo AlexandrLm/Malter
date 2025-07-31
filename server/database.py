@@ -2,8 +2,7 @@ from datetime import datetime
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert
-
-from config import DATABASE_URL
+from config import DATABASE_URL, CHAT_HISTORY_LIMIT
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
 
 # Создаем асинхронный "движок" и фабрику сессий
@@ -56,6 +55,11 @@ async def delete_long_term_memory(user_id: int):
         await session.execute(delete(LongTermMemory).where(LongTermMemory.user_id == user_id))
         await session.commit()
 
+async def delete_summary(user_id: int):
+    async with async_session_factory() as session:
+        await session.execute(delete(ChatSummary).where(ChatSummary.user_id == user_id))
+        await session.commit()
+
 async def save_long_term_memory(user_id: int, fact: str, category: str):
     """
     Сохраняет новый факт, только если точно такого же факта еще нет в базе.
@@ -75,37 +79,50 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
             # Возвращаем информацию, что факт не был сохранен, т.к. уже есть
             return {"status": "skipped", "reason": "duplicate fact"}
 
-        # 3. Если факта нет, создаем и сохраняем его
-        print(f"Сохранение нового факта для user_id {user_id}: '{fact}'")
-        memory = LongTermMemory(user_id=user_id, fact=fact, category=category)
+        # 3. Если факта нет, сохраняем его
+        print(f"Сохранение нового факта для user_id {user_id}")
+        memory = LongTermMemory(
+            user_id=user_id,
+            fact=fact,
+            category=category
+        )
         session.add(memory)
         await session.commit()
         return {"status": "success", "fact_saved": fact}
 
 # Измените тип возвращаемого значения для большей ясности
-async def get_long_term_memories(user_id: int, limit: int = 20) -> dict:
-    async with async_session_factory() as session:
-        result = await session.execute(
-            select(LongTermMemory)
-            .where(LongTermMemory.user_id == user_id)
-            .order_by(LongTermMemory.timestamp.desc())
-            .limit(limit)
-        )
-        memories = result.scalars().all()
+async def get_long_term_memories(user_id: int, query: str) -> dict:
+    """Выполняет поиск по ключевым словам в долгосрочной памяти."""
+    print(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
+    try:
+        async with async_session_factory() as session:
+            # Используем ilike для регистронезависимого поиска
+            result = await session.execute(
+                select(LongTermMemory).where(
+                    LongTermMemory.user_id == user_id,
+                    LongTermMemory.fact.ilike(f"%{query}%")
+                ).order_by(desc(LongTermMemory.timestamp)).limit(5)
+            )
+            memories = result.scalars().all()
 
-        # Преобразуем список объектов в список словарей
+        if not memories:
+            return {"memories": ["Поиск по ключевым словам не дал результатов."]}
+
+        # Форматируем результат
         formatted_memories = [
             {
                 "fact": mem.fact,
                 "category": mem.category,
-                "timestamp": str(mem.timestamp) 
+                "timestamp": str(mem.timestamp)
             }
             for mem in memories
         ]
 
-        # Возвращаем один словарь, как того ожидает API Gemini
-        # Ключ "memories" поможет модели понять структуру данных
         return {"memories": formatted_memories}
+
+    except Exception as e:
+        print(f"Ошибка при поиске по ключевым словам для user_id {user_id}: {e}")
+        return {"status": "error", "reason": "keyword_search_failed"}
 
 async def save_chat_message(user_id: int, role: str, content: str):
     """Сохраняет одно сообщение в историю чата."""
@@ -114,7 +131,7 @@ async def save_chat_message(user_id: int, role: str, content: str):
         session.add(message)
         await session.commit()
 
-async def get_chat_history(user_id: int, limit: int = 10) -> list[dict]:
+async def get_chat_history(user_id: int, limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
     """Извлекает историю чата для пользователя."""
     async with async_session_factory() as session:
         result = await session.execute(

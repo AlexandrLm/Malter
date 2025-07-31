@@ -19,9 +19,7 @@ class ChatResponse(BaseModel):
 
 class ProfileData(BaseModel):
     name: str
-    occupation: str
-    hobby: str
-    place: str
+    gender: str
     timezone: str | None = None
 
 class ProfileUpdate(BaseModel):

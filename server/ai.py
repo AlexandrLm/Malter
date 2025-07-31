@@ -47,16 +47,16 @@ add_memory_function = {
 
 get_memories_function = {
     "name": "get_long_term_memories",
-    "description": "Retrieves saved facts about the user. Use when you need details not in the current context, or when the user asks about the past ('what do you remember?'). AVOID using if the info is already present.",
+    "description": "Searches for specific facts about the user using a query. Use when you need details not in the current context (e.g., user asks 'what do you remember about my job?'). Formulate a query that captures the essence of the question.",
     "parameters": {
         "type": "object",
         "properties": {
-            "limit": {
-                "type": "integer",
-                "description": "Max number of memories to retrieve (default 20)."
+            "query": {
+                "type": "string",
+                "description": "The search query to find relevant facts. Example: 'user's job' or 'favorite color'."
             }
         },
-        "required": []
+        "required": ["query"]
     }
 }
 
@@ -65,10 +65,8 @@ def generate_user_prompt(profile: UserProfile):
     relationship_level = RELATIONSHIP_LEVELS_CONFIG.get(profile.relationship_level, {}).get("prompt_context", "")
     return (
         f"Имя: {profile.name}.\n"
+        f"Гендер: {profile.gender}.\n"
         f"ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ: {relationship_level}.\n"
-        # f"- Занимается: {profile.occupation}.\n"
-        # f"- Любимое общее дело: {profile.hobby}.\n"
-        # f"- Особенное место: {profile.place}.\n"
     )
 
 async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:

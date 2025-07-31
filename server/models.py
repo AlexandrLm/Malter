@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, DateTime, Index, func
+from sqlalchemy import BigInteger, DateTime, Index, func, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from datetime import datetime
 
@@ -13,9 +13,7 @@ class UserProfile(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     name: Mapped[str] = mapped_column(nullable=True)
-    occupation: Mapped[str] = mapped_column(nullable=True)
-    hobby: Mapped[str] = mapped_column(nullable=True)
-    place: Mapped[str] = mapped_column(nullable=True)
+    gender: Mapped[str] = mapped_column(nullable=True)
     timezone: Mapped[str] = mapped_column(nullable=True)
     relationship_level: Mapped[int] = mapped_column(server_default='1', nullable=False)
     relationship_score: Mapped[int] = mapped_column(server_default='0', nullable=False)
@@ -25,9 +23,7 @@ class UserProfile(Base):
     def to_dict(self):
         return {
             "name": self.name,
-            "occupation": self.occupation,
-            "hobby": self.hobby,
-            "place": self.place,
+            "gender": self.gender,
         }
     
 class LongTermMemory(Base):
@@ -36,7 +32,7 @@ class LongTermMemory(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fact: Mapped[str] = mapped_column(nullable=False)
-    category: Mapped[str] = mapped_column(nullable=True) 
+    category: Mapped[str] = mapped_column(nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 class ChatHistory(Base):
