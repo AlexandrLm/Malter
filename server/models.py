@@ -1,6 +1,6 @@
-from sqlalchemy import BigInteger, DateTime, Index, func, JSON
+from sqlalchemy import BigInteger, DateTime, Index, func, JSON, Date, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from datetime import datetime
+from datetime import datetime, date
 
 # Базовый класс для наших моделей
 class Base(DeclarativeBase):
@@ -18,7 +18,10 @@ class UserProfile(Base):
     relationship_level: Mapped[int] = mapped_column(server_default='1', nullable=False)
     relationship_score: Mapped[int] = mapped_column(server_default='0', nullable=False)
     level_unlocked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    has_subscription: Mapped[bool] = mapped_column(server_default='false', nullable=False)
+    subscription_plan: Mapped[str] = mapped_column(String, server_default='free', nullable=False)
+    subscription_expires: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    daily_message_count: Mapped[int] = mapped_column(server_default='0', nullable=False)
+    last_message_date: Mapped[date] = mapped_column(Date, nullable=True)
 
     def to_dict(self):
         return {

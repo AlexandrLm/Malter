@@ -31,4 +31,6 @@ class ChatHistory(BaseModel):
     history: list[dict]
 
 class ProfileStatus(BaseModel):
-    has_subscription: bool
+    subscription_plan: str
+    subscription_expires: datetime | None = None
+    daily_message_count: int

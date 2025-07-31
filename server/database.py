@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.dialects.postgresql import insert
@@ -125,10 +125,28 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
         return {"status": "error", "reason": "keyword_search_failed"}
 
 async def save_chat_message(user_id: int, role: str, content: str):
-    """Сохраняет одно сообщение в историю чата."""
+    """Сохраняет одно сообщение в историю чата и обновляет счетчик ежедневных сообщений."""
+    today = date.today()
     async with async_session_factory() as session:
+        # Обновляем счетчик ежедневных сообщений
+        profile = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+        profile = profile.scalars().first()
+        
+        if profile:
+            # Если дата последнего сообщения отличается от сегодняшней, сбрасываем счетчик
+            if profile.last_message_date != today:
+                profile.daily_message_count = 1
+                profile.last_message_date = today
+            else:
+                # Иначе увеличиваем счетчик
+                profile.daily_message_count += 1
+            
+            session.add(profile)
+        
+        # Сохраняем сообщение в истории чата
         message = ChatHistory(user_id=user_id, role=role, content=content)
         session.add(message)
+        
         await session.commit()
 
 async def get_chat_history(user_id: int, limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
