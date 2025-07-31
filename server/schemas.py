@@ -29,3 +29,6 @@ class ProfileUpdate(BaseModel):
 class ChatHistory(BaseModel):
     user_id: int
     history: list[dict]
+
+class ProfileStatus(BaseModel):
+    has_subscription: bool

@@ -95,7 +95,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             except pytz.UnknownTimeZoneError:
                 logging.warning(f"Неизвестная таймзона '{profile.timezone}' для пользователя {user_id}")
 
-        await save_chat_message(user_id, 'user', formatted_message)
 
         user_context = generate_user_prompt(profile)
         
@@ -125,7 +124,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         for msg in unsummarized_messages:
             history.append(genai_types.Content(role=msg.role, parts=[genai_types.Part.from_text(text=msg.content)]))
 
-        user_parts = [genai_types.Part.from_text(text=user_message)]
+        user_parts = [genai_types.Part.from_text(text=formatted_message)]
         if image_data:
             try:
                 image_bytes = base64.b64decode(image_data)
@@ -138,6 +137,9 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             except Exception as e:
                 logging.error(f"Ошибка обработки изображения для пользователя {user_id}: {e}", exc_info=True)
                 return "Ой, не могу посмотреть на твою картинку, что-то пошло не так."
+        
+        history.append(genai_types.Content(role='user', parts=user_parts))
+        await save_chat_message(user_id, 'user', formatted_message)
 
        
         tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
