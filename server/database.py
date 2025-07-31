@@ -90,7 +90,6 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
         await session.commit()
         return {"status": "success", "fact_saved": fact}
 
-# Измените тип возвращаемого значения для большей ясности
 async def get_long_term_memories(user_id: int, query: str) -> dict:
     """Выполняет поиск по ключевым словам в долгосрочной памяти."""
     print(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
@@ -149,24 +148,6 @@ async def save_chat_message(user_id: int, role: str, content: str):
         
         await session.commit()
 
-async def get_chat_history(user_id: int, limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
-    """Извлекает историю чата для пользователя."""
-    async with async_session_factory() as session:
-        result = await session.execute(
-            select(ChatHistory)
-            .where(ChatHistory.user_id == user_id)
-            .order_by(ChatHistory.timestamp.desc())
-            .limit(limit)
-        )
-        # Получаем сообщения и сразу разворачиваем, чтобы новые были в конце
-        messages = result.scalars().all()[::-1]
-        
-        history = [
-            {"role": msg.role, "parts": [{"text": msg.content}]}
-            for msg in messages
-        ]
-        return history
-
 async def get_latest_summary(user_id: int) -> ChatSummary | None:
     """Извлекает самую последнюю сводку для пользователя."""
     async with async_session_factory() as session:
@@ -178,7 +159,7 @@ async def get_latest_summary(user_id: int) -> ChatSummary | None:
         )
         return result.scalars().first()
 
-async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
+async def get_all_unsummarized_messages(user_id: int) -> list[ChatHistory]:
     """
     Извлекает все сообщения пользователя, которые еще не были включены в сводку.
     """
@@ -196,6 +177,26 @@ async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
         )
         return result.scalars().all()
 
+async def get_unsummarized_messages(user_id: int, limit: int = CHAT_HISTORY_LIMIT) -> list[ChatHistory]:
+    """
+    Извлекает сообщения пользователя, ограничено лимитом.
+    """
+    latest_summary = await get_latest_summary(user_id)
+    last_message_id = latest_summary.last_message_id if latest_summary else 0
+
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(ChatHistory)
+            .where(
+                ChatHistory.user_id == user_id,
+                ChatHistory.id > last_message_id
+            )
+            .order_by(ChatHistory.timestamp.desc())
+            .limit(limit)
+        )
+        messages = result.scalars().all()
+        return messages[::-1]
+    
 async def save_summary(user_id: int, summary_text: str, last_message_id: int):
     """
     Атомарно создает или обновляет сводку для пользователя (UPSERT).

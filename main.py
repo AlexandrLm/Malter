@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_chat_history
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_all_unsummarized_messages
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory, ProfileStatus
@@ -116,7 +116,7 @@ async def get_profile_handler(user_id: int):
 
 @app.get("/chat_history/{user_id}", response_model=ChatHistory | None)
 async def get_chat_history_handler(user_id: int):
-    chat_history = await get_chat_history(user_id)
+    chat_history = await get_all_unsummarized_messages(user_id)
     if not chat_history:
         return None
     return ChatHistory(user_id=user_id, history=chat_history)

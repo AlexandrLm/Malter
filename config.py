@@ -28,7 +28,7 @@ MODEL_NAME = "gemini-2.5-flash-lite"
 
 SUMMARY_THRESHOLD = 26 # Количество сообщений для запуска суммирования
 MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, которые будут взяты для создания сводки (и последующего удаления)
-CHAT_HISTORY_LIMIT = 8 # Количество последних сообщений, которые будут загружены из истории
+CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Необходимо установить TELEGRAM_BOT_TOKEN в .env файле")

@@ -62,11 +62,26 @@ get_memories_function = {
 
 def generate_user_prompt(profile: UserProfile):
     """Генерирует часть системного промпта с информацией о пользователе."""
-    relationship_level = RELATIONSHIP_LEVELS_CONFIG.get(profile.relationship_level, {}).get("prompt_context", "")
+    level_config = RELATIONSHIP_LEVELS_CONFIG.get(profile.relationship_level)
+    relationship_name = level_config.get("name", "Незнакомец")
+    relationship_context = level_config.get("prompt_context", "")
+    behavioral_rules = level_config.get("behavioral_rules", [])
+    forbidden_topics = level_config.get("forbidden_topics", [])
+    relationship_example = level_config.get("example_dialog", "")
+        # Форматируем в строки для промпта
+    rules_str = "\n".join([f"- {rule}" for rule in behavioral_rules])
+    topics_str = ", ".join(forbidden_topics)
+
     return (
         f"Имя: {profile.name}.\n"
         f"Гендер: {profile.gender}.\n"
-        f"ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ: {relationship_level}.\n"
+        f"ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ:\n"
+        f"## Текущий уровень: {relationship_name}\n"
+        f"## Описание: {relationship_context}\n"
+        f"## Правила поведения на этом уровне:\n{rules_str}\n"
+        f"## Запрещенные темы на этом уровне: {topics_str}\n"
+        f"## Стиль для текущего уровня отношений ({relationship_name})\n"
+        f"  {relationship_example}"
     )
 
 async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:
