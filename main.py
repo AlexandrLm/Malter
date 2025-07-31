@@ -14,7 +14,7 @@ import json
 from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_chat_history
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
-from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory
+from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory, ProfileStatus
 
 # --- Rate Limiting ---
 async def get_limiter_key(request: Request) -> str:
@@ -134,6 +134,16 @@ async def delete_profile_handler(user_id: int):
     await delete_summary(user_id)
     return {"message": "Профиль и история чата успешно удалены"}
 
-
+@app.get("/profile/status/{user_id}", response_model=ProfileStatus)
+async def get_profile_status_handler(user_id: int):
+    profile = await get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Профиль не найден")
+    
+    return ProfileStatus(
+        subscription_plan=profile.subscription_plan,
+        subscription_expires=profile.subscription_expires,
+        daily_message_count=profile.daily_message_count
+    )
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
