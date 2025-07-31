@@ -172,13 +172,14 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             print(contents)
             print(system_instruction)
-
+            
             response = await call_gemini_api_with_retry(
                 user_id=user_id,
                 model_name=MODEL_NAME,
                 contents=contents,
                 tools=[tools],
-                system_instruction=system_instruction
+                system_instruction=system_instruction,
+                thinking_budget=0
             )
             logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{response}'")
 
@@ -270,7 +271,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
-async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: list, tools: list, system_instruction: str):
+async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: list, tools: list, system_instruction: str, thinking_budget: int = 0):
     """
     Выполняет вызов к Gemini API с логикой повторных попыток.
     """
@@ -283,7 +284,8 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
                 tools=tools,
                 system_instruction=system_instruction,
                 thinking_config=genai_types.ThinkingConfig(
-                    thinking_budget=512
+                    # 512 или 0 для отключения Thinking
+                    thinking_budget=thinking_budget
                 )
             )
         )
