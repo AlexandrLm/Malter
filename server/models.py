@@ -24,10 +24,9 @@ class UserProfile(Base):
     last_message_date: Mapped[date] = mapped_column(Date, nullable=True)
 
     def to_dict(self):
-        return {
-            "name": self.name,
-            "gender": self.gender,
-        }
+        # Используем inspect, чтобы автоматически собирать все поля модели
+        from sqlalchemy import inspect
+        return {c.key: getattr(self, c.key) for c in inspect(self).mapper.column_attrs}
     
 class LongTermMemory(Base):
     __tablename__ = "long_term_memories"

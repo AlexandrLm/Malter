@@ -96,7 +96,16 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
     uploaded_file = None
     try:
-        profile = await get_profile(user_id)
+        # --- Параллельное извлечение данных из БД ---
+        profile_task = get_profile(user_id)
+        summary_task = get_latest_summary(user_id)
+        messages_task = get_unsummarized_messages(user_id)
+
+        profile, latest_summary, unsummarized_messages = await asyncio.gather(
+            profile_task, summary_task, messages_task
+        )
+        # -----------------------------------------
+
         if not profile:
             logging.error(f"Профиль пользователя {user_id} не найден!")
             return "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение."
@@ -110,29 +119,17 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             except pytz.UnknownTimeZoneError:
                 logging.warning(f"Неизвестная таймзона '{profile.timezone}' для пользователя {user_id}")
 
-
         user_context = generate_user_prompt(profile)
-        
-        # Получаем контекст отношений
-        # relationship_level = profile.relationship_level
-        # relationship_context = RELATIONSHIP_LEVELS_CONFIG.get(relationship_level, {}).get("prompt_context", "")
-        
         system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
-        # system_instruction += f"\n\n# ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ\n{relationship_context}"
-        
 
-        # Получаем сводку и ДОБАВЛЯЕМ ее к системному промпту, а не в историю
-        latest_summary = await get_latest_summary(user_id)
+        # Добавляем сводку к системному промпту
         if latest_summary:
             summary_context = (
-                "Это краткая сводка вашего предыдущего долгого разговора. "
+                "\n\nЭто краткая сводка вашего предыдущего долгого разговора. "
                 "Используй ее, чтобы помнить контекст, но не ссылайся на нее прямо в ответе.\n"
                 f"Сводка: {latest_summary.summary}"
             )
-            system_instruction += summary_context # Добавляем к основной инструкции
-
-        # Получаем сообщения, которые еще не вошли в сводку
-        unsummarized_messages = await get_unsummarized_messages(user_id)
+            system_instruction += summary_context
 
         # Форматируем и добавляем их в историю (без системного сообщения!)
         history = []
@@ -170,8 +167,8 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             iteration_count += 1
             contents = history
 
-            print(contents)
-            print(system_instruction)
+            # print(contents)
+            # print(system_instruction)
             
             response = await call_gemini_api_with_retry(
                 user_id=user_id,

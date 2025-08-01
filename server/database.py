@@ -1,13 +1,27 @@
 from datetime import datetime, date
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+import json
 from sqlalchemy.dialects.postgresql import insert
-from config import DATABASE_URL, CHAT_HISTORY_LIMIT
+from config import DATABASE_URL, CHAT_HISTORY_LIMIT, REDIS_CLIENT
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
 
 # Создаем асинхронный "движок" и фабрику сессий
-async_engine = create_async_engine(DATABASE_URL)
+async_engine = create_async_engine(
+    DATABASE_URL,
+    pool_size=20,  # Количество соединений, которые будут оставаться открытыми в пуле
+    max_overflow=10, # Максимальное количество "дополнительных" соединений сверх pool_size
+    pool_timeout=30, # Время в секундах, которое можно ждать соединения перед тем, как выбросить ошибку
+    pool_recycle=1800 # Время в секундах, через которое соединение будет пересоздано (для предотвращения проблем с "устаревшими" соединениями)
+)
 async_session_factory = async_sessionmaker(async_engine)
+
+# --- Константы для кэширования ---
+CACHE_TTL_SECONDS = 3600 # 1 час
+
+def get_profile_cache_key(user_id: int) -> str:
+    """Генерирует ключ для кэша профиля."""
+    return f"profile:{user_id}"
 
 # Функция для инициализации БД (создания таблицы)
 async def init_db():
@@ -16,33 +30,69 @@ async def init_db():
 
 # CRUD-операции
 async def get_profile(user_id: int) -> UserProfile | None:
+    """
+    Получает профиль пользователя, используя кэширование в Redis.
+    """
+    if REDIS_CLIENT:
+        cache_key = get_profile_cache_key(user_id)
+        cached_profile_json = await REDIS_CLIENT.get(cache_key)
+        if cached_profile_json:
+            profile_data = json.loads(cached_profile_json)
+            # Преобразуем строки с датами обратно в объекты date/datetime
+            for key, value in profile_data.items():
+                if isinstance(value, str):
+                    try:
+                        profile_data[key] = datetime.fromisoformat(value)
+                    except (ValueError, TypeError):
+                        try:
+                            profile_data[key] = date.fromisoformat(value)
+                        except (ValueError, TypeError):
+                            pass
+            return UserProfile(**profile_data)
+
+    # Если в кэше нет, идем в БД
     async with async_session_factory() as session:
         result = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
-        return result.scalars().first()
+        profile = result.scalars().first()
+
+    # Сохраняем в кэш, если профиль найден
+    if profile and REDIS_CLIENT:
+        profile_dict = profile.to_dict()
+        # Конвертируем date/datetime в ISO строки для JSON
+        for key, value in profile_dict.items():
+            if isinstance(value, (datetime, date)):
+                profile_dict[key] = value.isoformat()
+        
+        cache_key = get_profile_cache_key(user_id)
+        await REDIS_CLIENT.set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
+
+    return profile
 
 async def create_or_update_profile(user_id: int, data: dict):
     """
-    Атомарно создает или обновляет профиль пользователя, используя UPSERT.
-    Примечание: эта реализация специфична для PostgreSQL.
-    Для SQLite потребуется оставить старую логику "select-then-update".
+    Атомарно создает или обновляет профиль и инвалидирует кэш.
     """
     async with async_session_factory() as session:
-        # Создаем оператор insert
         stmt = insert(UserProfile).values(user_id=user_id, **data)
-        
-        # Указываем, что делать при конфликте по уникальному полю user_id
-        stmt = stmt.on_conflict_do_update(
-            index_elements=['user_id'],  # Поле, которое вызывает конфликт
-            set_=data  # Обновляем поля из словаря data
-        )
-        
+        stmt = stmt.on_conflict_do_update(index_elements=['user_id'], set_=data)
         await session.execute(stmt)
         await session.commit()
 
+    # Инвалидируем кэш
+    if REDIS_CLIENT:
+        cache_key = get_profile_cache_key(user_id)
+        await REDIS_CLIENT.delete(cache_key)
+
 async def delete_profile(user_id: int):
+    """Удаляет профиль и инвалидирует кэш."""
     async with async_session_factory() as session:
         await session.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
         await session.commit()
+
+    # Инвалидируем кэш
+    if REDIS_CLIENT:
+        cache_key = get_profile_cache_key(user_id)
+        await REDIS_CLIENT.delete(cache_key)
 
 async def delete_chat_history(user_id: int):
     """Удаляет всю историю чата для пользователя."""

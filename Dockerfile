@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED 1
 
 # Копируем файл с зависимостями и устанавливаем их
 COPY requirements.txt .
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
+RUN pip wheel --timeout=600 --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
 
 # --- Этап 2: Сборка финального образа ---
 FROM python:3.10.13-slim-bullseye

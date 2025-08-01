@@ -2,33 +2,54 @@ services:
   api:
     build:
       context: .
-      # РЕКОМЕНДАЦИЯ: Используйте отдельный Dockerfile, например api.Dockerfile
-      dockerfile: Dockerfile 
+      dockerfile: Dockerfile
+    restart: always
     env_file:
       - .env
+    environment:
+      - REDIS_HOST=redis
     ports:
       - "8000:8000"
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-    depends_on:
-      # API теперь будет ждать, пока миграции успешно завершатся
-      migration:
-        condition: service_completed_successfully
-
-  # Сервис бота тоже будет ждать завершения миграций
-  bot:
-    build:
-      context: .
-      # РЕКОМЕНДАЦИЯ: Используйте отдельный Dockerfile, например bot.Dockerfile
-      dockerfile: Dockerfile
-    env_file:
-      - .env
+    command:
+      - gunicorn
+      - -w
+      - "4"
+      - -k
+      - uvicorn.workers.UvicornWorker
+      - main:app
+      - --bind
+      - 0.0.0.0:8000
     depends_on:
       migration:
         condition: service_completed_successfully
       redis:
-        # Теперь бот будет ждать, пока Redis будет полностью готов
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      redis:
         condition: service_healthy
     command: ["python", "-m", "bot"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   migration:
     build:
