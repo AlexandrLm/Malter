@@ -21,7 +21,7 @@ async def check_for_level_up(user_id: int) -> str | None:
     current_level_config = RELATIONSHIP_LEVELS_CONFIG[current_level]
 
     # Проверка критериев для повышения уровня
-    if next_level_config['is_paid'] and not profile.has_subscription:
+    if next_level_config['is_paid'] and profile.subscription_plan != 'premium':
         return "offer_subscription" # Предложить подписку
 
     if profile.relationship_score < next_level_config['min_score']:

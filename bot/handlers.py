@@ -12,7 +12,7 @@ from geopy.geocoders import Nominatim
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 # Импортируем URL из конфига, а не хардкодим
-from config import API_BASE_URL
+from config import API_BASE_URL, DAILY_MESSAGE_LIMIT
 
 router = Router()
 tf = TimezoneFinder()
@@ -144,9 +144,9 @@ async def command_status(message: types.Message, client: httpx.AsyncClient):
                 plan = data['subscription_plan']
                 expires = data['subscription_expires']
                 count = data['daily_message_count']
-                limit = 50 # Значение из config.py
+                limit = DAILY_MESSAGE_LIMIT
                 
-                status_text = f"Твой тариф: *{plan.capitalize()}*\n"
+                status_text = f"Твой тариф: *{plan.capitalize()}\n"
                 if plan == 'premium' and expires:
                     status_text += f"Подписка действует до: {expires.split('T')[0]}\n"
                 elif plan == 'free':
@@ -168,7 +168,7 @@ async def command_premium(message: types.Message):
     premium_info = (
         "✨ *Премиум-подписка MashaGPT* ✨\n\n"
         "Разблокируй все возможности общения!\n\n"
-        " Unlimited общение без дневных лимитов.\n"
+        f" Unlimited общение без дневных лимитов (бесплатные пользователи могут отправлять до {DAILY_MESSAGE_LIMIT} сообщений в день).\n"
         " 🧠 Продвинутую память (суммаризация диалогов).\n"
         " 📷 Возможность отправлять фото и получать комментарии.\n"
         " 🎙️ Голосовые сообщения от Маши.\n"
