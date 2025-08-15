@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     print("Сервер выключается.")
 
 app = FastAPI(
-    title="MashaGPT Backend",
+    title="EvolveAI Backend",
     lifespan=lifespan
 )
 app.state.limiter = limiter
@@ -70,7 +70,7 @@ async def read_root():
     """
     Возвращает JSON с сообщением о том, что бэкенд запущен.
     """
-    return {"message": "MashaGPT Backend is running"}
+    return {"message": "EvolveAI Backend is running"}
 
 @app.get("/health", status_code=200, summary="Проверка работоспособности", description="Проверяет, что сервис запущен и работает.")
 async def health_check():
