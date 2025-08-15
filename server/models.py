@@ -1,13 +1,39 @@
+"""
+Модели базы данных для приложения.
+
+Этот файл определяет модели SQLAlchemy, которые используются для взаимодействия с базой данных.
+"""
+
 from sqlalchemy import BigInteger, DateTime, Index, func, JSON, Date, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from datetime import datetime, date
 
 # Базовый класс для наших моделей
 class Base(DeclarativeBase):
+    """
+    Базовый класс для всех моделей SQLAlchemy.
+    """
     pass
 
 # Модель пользователя для таблицы в БД
 class UserProfile(Base):
+    """
+    Модель профиля пользователя.
+    
+    Attributes:
+        id (int): Уникальный идентификатор записи.
+        user_id (int): Уникальный идентификатор пользователя.
+        name (str): Имя пользователя.
+        gender (str): Пол пользователя.
+        timezone (str): Временная зона пользователя.
+        relationship_level (int): Уровень отношений с пользователем.
+        relationship_score (int): Очки отношений с пользователем.
+        level_unlocked_at (datetime): Дата и время разблокировки текущего уровня.
+        subscription_plan (str): План подписки пользователя.
+        subscription_expires (datetime): Дата истечения подписки.
+        daily_message_count (int): Количество сообщений за день.
+        last_message_date (date): Дата последнего сообщения.
+    """
     __tablename__ = "user_profiles"
     
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -29,6 +55,16 @@ class UserProfile(Base):
         return {c.key: getattr(self, c.key) for c in inspect(self).mapper.column_attrs}
     
 class LongTermMemory(Base):
+    """
+    Модель долговременной памяти.
+    
+    Attributes:
+        id (int): Уникальный идентификатор записи.
+        user_id (int): Уникальный идентификатор пользователя.
+        fact (str): Факт о пользователе.
+        category (str): Категория факта.
+        timestamp (datetime): Дата и время создания записи.
+    """
     __tablename__ = "long_term_memories"
     
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -38,6 +74,16 @@ class LongTermMemory(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 class ChatHistory(Base):
+   """
+   Модель истории чата.
+   
+   Attributes:
+       id (int): Уникальный идентификатор записи.
+       user_id (int): Уникальный идентификатор пользователя.
+       role (str): Роль отправителя сообщения ('user' или 'model').
+       content (str): Содержание сообщения.
+       timestamp (datetime): Дата и время создания записи.
+   """
    __tablename__ = "chat_history"
    
    id: Mapped[int] = mapped_column(primary_key=True)
@@ -51,6 +97,16 @@ class ChatHistory(Base):
    )
 
 class ChatSummary(Base):
+    """
+    Модель сводки чата.
+    
+    Attributes:
+        id (int): Уникальный идентификатор записи.
+        user_id (int): Уникальный идентификатор пользователя.
+        summary (str): Сводка чата.
+        last_message_id (int): Идентификатор последнего сообщения, включенного в сводку.
+        timestamp (datetime): Дата и время создания записи.
+    """
     __tablename__ = "chat_summaries"
 
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -1,3 +1,10 @@
+"""
+Модуль для генерации ответов AI.
+
+Этот файл содержит функции для взаимодействия с моделью Gemini,
+генерации ответов на сообщения пользователей и обработки изображений.
+"""
+
 import logging
 import asyncio
 from functools import partial
@@ -8,7 +15,7 @@ from google.genai.errors import APIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from prompts import BASE_SYSTEM_PROMPT
 from personality_prompts import PERSONALITIES
-from config import MODEL_NAME, GEMINI_CLIENT
+from config import CHAT_HISTORY_LIMIT, MODEL_NAME, GEMINI_CLIENT
 from server.relationship_config import RELATIONSHIP_LEVELS_CONFIG
 from server.database import (
     get_profile,
@@ -17,13 +24,14 @@ from server.database import (
     get_long_term_memories,
     save_chat_message,
     get_latest_summary,
-    get_unsummarized_messages
+    get_unsummarized_messages,
+    ChatHistory,
+    ChatSummary
 )
-from datetime import datetime
 import pytz
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+# Глобальная переменная для клиента
 client = GEMINI_CLIENT
 
 add_memory_function = {
@@ -60,8 +68,16 @@ get_memories_function = {
     }
 }
 
-def generate_user_prompt(profile: UserProfile):
-    """Генерирует часть системного промпта с информацией о пользователе."""
+def generate_user_prompt(profile: UserProfile) -> str:
+    """
+    Генерирует часть системного промпта с информацией о пользователе.
+    
+    Args:
+        profile (UserProfile): Объект профиля пользователя.
+        
+    Returns:
+        str: Сформированная часть системного промпта с информацией о пользователе.
+    """
     level_config = RELATIONSHIP_LEVELS_CONFIG.get(profile.relationship_level)
     relationship_name = level_config.get("name", "Незнакомец")
     relationship_context = level_config.get("prompt_context", "")
@@ -83,6 +99,99 @@ def generate_user_prompt(profile: UserProfile):
         f"## Стиль для текущего уровня отношений ({relationship_name})\n"
         f"  {relationship_example}"
     )
+
+
+def format_user_message(user_message: str, profile: UserProfile, timestamp: datetime) -> str:
+    """
+    Форматирует сообщение пользователя с учетом его временной зоны.
+    
+    Args:
+        user_message (str): Исходное сообщение пользователя.
+        profile (UserProfile): Профиль пользователя.
+        timestamp (datetime): Временная метка сообщения.
+        
+    Returns:
+        str: Отформатированное сообщение пользователя.
+    """
+    formatted_message = user_message
+    if profile.timezone:
+        try:
+            user_timezone = pytz.timezone(profile.timezone)
+            user_time = timestamp.astimezone(user_timezone)
+            formatted_message = f"[{user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
+        except pytz.UnknownTimeZoneError:
+            logging.warning(f"Неизвестная таймзона '{profile.timezone}' для пользователя {profile.user_id}")
+    
+    return formatted_message
+
+
+def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary | None) -> str:
+    """
+    Формирует системный промпт для AI.
+    
+    Args:
+        profile (UserProfile): Профиль пользователя.
+        latest_summary (ChatSummary | None): Последняя сводка чата.
+        
+    Returns:
+        str: Сформированный системный промпт.
+    """
+    user_context = generate_user_prompt(profile)
+    system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
+
+    # Добавляем сводку к системному промпту
+    if latest_summary:
+        summary_context = (
+            "\n\nЭто краткая сводка вашего предыдущего долгого разговора. "
+            "Используй ее, чтобы помнить контекст, но не ссылайся на нее прямо в ответе.\n"
+            f"Сводка: {latest_summary.summary}"
+        )
+        system_instruction += summary_context
+        
+    return system_instruction
+
+
+def create_history_from_messages(messages: list[ChatHistory]) -> list[genai_types.Content]:
+    """
+    Создает историю чата в формате, понятном для Gemini API.
+    
+    Args:
+        messages (list[ChatHistory]): Список сообщений из базы данных.
+        
+    Returns:
+        list[genai_types.Content]: История чата в формате Gemini API.
+    """
+    history = []
+    for msg in messages:
+        history.append(genai_types.Content(role=msg.role, parts=[genai_types.Part.from_text(text=msg.content)]))
+    return history
+
+
+async def process_image_data(image_data: str | None, user_id: int) -> genai_types.Part | None:
+    """
+    Обрабатывает данные изображения и возвращает объект Part для Gemini API.
+    
+    Args:
+        image_data (str | None): Данные изображения в формате base64.
+        user_id (int): Идентификатор пользователя.
+        
+    Returns:
+        genai_types.Part | None: Объект Part с изображением или None, если изображение отсутствует или произошла ошибка.
+    """
+    if not image_data:
+        return None
+        
+    try:
+        image_bytes = base64.b64decode(image_data)
+        logging.info(f"Обработка изображения размером {len(image_bytes)} байт для пользователя {user_id}")
+        return genai_types.Part.from_bytes(
+            data=image_bytes,
+            mime_type='image/jpeg'
+        )
+    except Exception as e:
+        logging.error(f"Ошибка обработки изображения для пользователя {user_id}: {e}", exc_info=True)
+        return None
+
 
 async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:
     """
@@ -110,45 +219,15 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             logging.error(f"Профиль пользователя {user_id} не найден!")
             return "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение."
 
-        formatted_message = user_message
-        if profile.timezone:
-            try:
-                user_timezone = pytz.timezone(profile.timezone)
-                user_time = timestamp.astimezone(user_timezone)
-                formatted_message = f"[{user_time.strftime('%d.%m.%Y %H:%M')}] {user_message}"
-            except pytz.UnknownTimeZoneError:
-                logging.warning(f"Неизвестная таймзона '{profile.timezone}' для пользователя {user_id}")
-
-        user_context = generate_user_prompt(profile)
-        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
-
-        # Добавляем сводку к системному промпту
-        if latest_summary:
-            summary_context = (
-                "\n\nЭто краткая сводка вашего предыдущего долгого разговора. "
-                "Используй ее, чтобы помнить контекст, но не ссылайся на нее прямо в ответе.\n"
-                f"Сводка: {latest_summary.summary}"
-            )
-            system_instruction += summary_context
-
-        # Форматируем и добавляем их в историю (без системного сообщения!)
-        history = []
-        for msg in unsummarized_messages:
-            history.append(genai_types.Content(role=msg.role, parts=[genai_types.Part.from_text(text=msg.content)]))
+        formatted_message = format_user_message(user_message, profile, timestamp)
+        system_instruction = build_system_instruction(profile, latest_summary)
+        # Ограничиваем количество сообщений, передаваемых в историю
+        history = create_history_from_messages(unsummarized_messages[-CHAT_HISTORY_LIMIT:])
 
         user_parts = [genai_types.Part.from_text(text=formatted_message)]
-        if image_data:
-            try:
-                image_bytes = base64.b64decode(image_data)
-                logging.info(f"Обработка изображения размером {len(image_bytes)} байт для пользователя {user_id}")
-                image_part = genai_types.Part.from_bytes(
-                    data=image_bytes,
-                    mime_type='image/jpeg'
-                )
-                user_parts.insert(0, image_part) # Вставляем картинку перед текстом
-            except Exception as e:
-                logging.error(f"Ошибка обработки изображения для пользователя {user_id}: {e}", exc_info=True)
-                return "Ой, не могу посмотреть на твою картинку, что-то пошло не так."
+        image_part = await process_image_data(image_data, user_id)
+        if image_part:
+            user_parts.insert(0, image_part) # Вставляем картинку перед текстом
         
         history.append(genai_types.Content(role='user', parts=user_parts))
         await save_chat_message(user_id, 'user', formatted_message)
@@ -271,6 +350,17 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: list, tools: list, system_instruction: str, thinking_budget: int = 0):
     """
     Выполняет вызов к Gemini API с логикой повторных попыток.
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        model_name (str): Название модели для генерации.
+        contents (list): Содержание запроса.
+        tools (list): Список инструментов для использования моделью.
+        system_instruction (str): Системная инструкция для модели.
+        thinking_budget (int): Бюджет для "мышления" модели.
+        
+    Returns:
+        response: Ответ от API Gemini.
     """
     logging.info(f"Попытка вызова Gemini API для пользователя {user_id}")
     try:
@@ -281,7 +371,6 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
                 tools=tools,
                 system_instruction=system_instruction,
                 thinking_config=genai_types.ThinkingConfig(
-                    # 512 или 0 для отключения Thinking
                     thinking_budget=thinking_budget
                 )
             )
