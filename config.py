@@ -36,8 +36,8 @@ DATABASE_URL = (
     f"{POSTGRES_DB}"
 )
 
-MODEL_NAME = "gemini-2.5-flash-lite"
-# MODEL_NAME = "gemini-2.5-flash"
+# MODEL_NAME = "gemini-2.5-flash-lite"
+MODEL_NAME = "gemini-2.5-flash"
 # MODEL_NAME = "gemini-2.5-pro"
 
 SUMMARY_THRESHOLD = 26 # Количество сообщений для запуска суммирования
