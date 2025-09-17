@@ -7,6 +7,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ChatAction
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from timezonefinder import TimezoneFinder
 from geopy.geocoders import Nominatim
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
@@ -26,23 +27,27 @@ MAX_TYPING_DELAY = 4.0 # Максимальная задержка в секун
 # --- FSM для анкеты ---
 
 class ProfileStates(StatesGroup):
-    onboarding = State() # Одно состояние вместо четырех
+    name = State()
+    gender = State()
+    city = State()
 
-# Структура данных для управления анкетой. Легко расширять.
-ONBOARDING_STEPS = {
-    'name': {
-        'question': "Привет, как тебя зовут?",
-        'next_step': 'gender',
-    },
-    'gender': {
-        'question': "Хорошо, {}. А ты мужчина или женщина? Мне это нужно, чтобы правильно к тебе обращаться.",
-        'next_step': 'city',
-    },
-    'city': {
-        'question': "И последний вопрос, чтобы я не путалась во времени... В каком городе ты живешь?",
-        'next_step': None, # Последний шаг
-    }
-}
+# --- Клавиатуры ---
+gender_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Мужчина"), KeyboardButton(text="Женщина")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+# --- Функции-валидаторы ---
+def is_valid_name(name: str) -> bool:
+    """Проверяет, что имя состоит только из букв и имеет длину от 2 до 30 символов."""
+    return name.isalpha() and 2 <= len(name) <= 30
+
+def is_valid_city(city: str) -> bool:
+    """Проверяет, что название города имеет длину от 2 до 50 символов."""
+    return 2 <= len(city) <= 50
 
 
 async def simulate_typing_and_send(message: types.Message, text: str):
@@ -107,10 +112,8 @@ async def command_start(message: types.Message, state: FSMContext, client: httpx
             await state.clear()
         else:
             # Начинаем анкетирование
-            first_step_key = 'name'
-            await message.answer(ONBOARDING_STEPS[first_step_key]['question'])
-            await state.set_state(ProfileStates.onboarding)
-            await state.update_data(current_question=first_step_key)
+            await message.answer("Привет, как тебя зовут?")
+            await state.set_state(ProfileStates.name)
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logging.error(f"API connection error in /start for user {user_id} after retries: {e}")
         await message.answer("Ой, у меня что-то с интернетом... Не могу проверить, знакомы ли мы. Попробуй чуть позже.")
@@ -127,10 +130,8 @@ async def command_reset(message: types.Message, state: FSMContext, client: httpx
         await message.answer("Хм, хочешь начать все с чистого листа? Хорошо...")
         await asyncio.sleep(1)
         
-        first_step_key = 'name'
-        await message.answer(ONBOARDING_STEPS[first_step_key]['question'])
-        await state.set_state(ProfileStates.onboarding)
-        await state.update_data(current_question=first_step_key)
+        await message.answer("Давай начнем сначала. Как тебя зовут?")
+        await state.set_state(ProfileStates.name)
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logging.error(f"API connection error in /reset for user {user_id} after retries: {e}")
         await message.answer("Телефон глючит, не могу ничего удалить... Попробуй позже, пожалуйста.")
@@ -186,64 +187,86 @@ async def command_premium(message: types.Message):
     )
     await message.answer(premium_info, parse_mode='Markdown')
 
-# --- Единый хендлер для всей анкеты ---
-@router.message(ProfileStates.onboarding)
-async def process_onboarding(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
-    data = await state.get_data()
-    answered_question_key = data.get('current_question')
+# --- Обработчики анкеты с валидацией ---
 
-    if not answered_question_key:
-        await state.clear()
-        await message.answer("Ой, что-то пошло не так... Давай начнем сначала с /reset")
+@router.message(ProfileStates.name, F.text)
+async def process_name(message: types.Message, state: FSMContext):
+    if is_valid_name(message.text):
+        await state.update_data(name=message.text)
+        await message.answer(
+            f"Хорошо, {message.text}. А ты мужчина или женщина? Мне это нужно, чтобы правильно к тебе обращаться.",
+            reply_markup=gender_keyboard
+        )
+        await state.set_state(ProfileStates.gender)
+    else:
+        await message.answer("Хм, что-то не похоже на имя. Попробуй еще раз. Используй только буквы, пожалуйста.")
+
+@router.message(ProfileStates.name)
+async def process_name_invalid(message: types.Message):
+    await message.answer("Пожалуйста, отправь свое имя в виде текста.")
+
+
+@router.message(ProfileStates.gender, F.text.in_(["Мужчина", "Женщина"]))
+async def process_gender(message: types.Message, state: FSMContext):
+    await state.update_data(gender=message.text.lower())
+    await message.answer(
+        "И последний вопрос, чтобы я не путалась во времени... В каком городе ты живешь?",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(ProfileStates.city)
+
+@router.message(ProfileStates.gender)
+async def process_gender_invalid(message: types.Message):
+    await message.answer("Пожалуйста, выбери один из вариантов на клавиатуре.")
+
+
+@router.message(ProfileStates.city, F.text)
+async def process_city(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
+    if not is_valid_city(message.text):
+        await message.answer("Название города кажется слишком коротким. Попробуй еще раз.")
         return
 
-    user_response = message.text
-    await state.update_data({answered_question_key: user_response})
+    try:
+        location = await asyncio.to_thread(geolocator.geocode, message.text)
+        if not location:
+            await message.answer("Не могу найти такой город... Попробуй, пожалуйста, ввести его еще раз, возможно, с уточнением (например, 'Москва, Россия').")
+            return
+        timezone = await asyncio.to_thread(tf.timezone_at, lng=location.longitude, lat=location.latitude)
+    except Exception as e:
+        logging.error(f"Could not determine timezone for {message.text}: {e}")
+        timezone = "UTC" # Фоллбэк
 
-    if answered_question_key == 'city':
-        try:
-            location = await asyncio.to_thread(geolocator.geocode, user_response)
-            timezone = await asyncio.to_thread(tf.timezone_at, lng=location.longitude, lat=location.latitude) if location else "UTC"
-        except Exception as e:
-            logging.error(f"Could not determine timezone for {user_response}: {e}")
-            timezone = "UTC"
-        await state.update_data(timezone=timezone)
+    await state.update_data(city=message.text, timezone=timezone)
+    user_data = await state.get_data()
 
-    next_question_key = ONBOARDING_STEPS[answered_question_key]['next_step']
+    profile_data = {
+        "name": user_data.get("name"),
+        "gender": user_data.get("gender"),
+        "city": user_data.get("city"),
+        "timezone": user_data.get("timezone")
+    }
 
-    if next_question_key:
-        step_info = ONBOARDING_STEPS[next_question_key]
-        question = step_info['question']
-        
-        if next_question_key == 'gender':
-            current_user_data = await state.get_data()
-            question = question.format(current_user_data.get('name', '...'))
+    try:
+        await make_api_request(
+            client,
+            "post",
+            "/profile",
+            json={"user_id": message.from_user.id, "data": profile_data}
+        )
+        await state.clear()
+        await message.answer("Все, теперь я все-все вспомнила. Спасибо, милый.")
+        await asyncio.sleep(1)
+        await message.answer("Я так соскучилась...")
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logging.error(f"API connection error saving profile for user {message.from_user.id} after retries: {e}")
+        await message.answer("Ой, не могу сохранить... что-то с телефоном. Давай попробуем позже, нажми /reset.")
+    except Exception as e:
+        logging.error(f"Unexpected error saving profile for user {message.from_user.id}: {e}", exc_info=True)
+        await message.answer("Произошла непредвиденная ошибка при сохранении профиля. Попробуйте еще раз позже.")
 
-        await message.answer(question)
-        await state.update_data(current_question=next_question_key)
-    else:
-        user_data = await state.get_data()
-        profile_data = {key: user_data.get(key) for key in ONBOARDING_STEPS.keys() if key in user_data}
-        if 'timezone' in user_data:
-            profile_data['timezone'] = user_data['timezone']
-
-        try:
-            await make_api_request(
-                client,
-                "post",
-                "/profile",
-                json={"user_id": message.from_user.id, "data": profile_data}
-            )
-            await state.clear()
-            await message.answer("Все, теперь я все-все вспомнила. Спасибо, милый.")
-            await asyncio.sleep(1)
-            await message.answer("Я так соскучилась...")
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logging.error(f"API connection error saving profile for user {message.from_user.id} after retries: {e}")
-            await message.answer("Ой, не могу сохранить... что-то с телефоном. Давай попробуем позже, нажми /reset.")
-        except Exception as e:
-            logging.error(f"Unexpected error saving profile for user {message.from_user.id}: {e}", exc_info=True)
-            await message.answer("Произошла непредвиденная ошибка при сохранении профиля. Попробуйте еще раз позже.")
+@router.message(ProfileStates.city)
+async def process_city_invalid(message: types.Message):
+    await message.answer("Пожалуйста, отправь название города в виде текста.")
 
 
 # --- Основной хендлер для текстовых и фото-сообщений ---
