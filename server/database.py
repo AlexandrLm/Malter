@@ -342,3 +342,20 @@ async def delete_summarized_messages(user_id: int, last_message_id: int):
             )
         )
         await session.commit()
+
+async def get_all_user_ids() -> list[int]:
+    """
+    Получает список всех уникальных user_id, которые взаимодействовали с ботом.
+    Пользователи определяются по наличию записей в таблице профилей.
+    
+    Returns:
+        list[int]: Список уникальных идентификаторов пользователей.
+    """
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(select(UserProfile.user_id))
+            user_ids = [row[0] for row in result.fetchall()]
+            return user_ids
+    except Exception as e:
+        logging.error(f"Ошибка при получении списка всех пользователей: {e}")
+        return []
