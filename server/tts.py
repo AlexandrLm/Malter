@@ -80,7 +80,7 @@ async def call_tts_api_with_retry(text_to_speak: str):
                 speech_config=genai_types.SpeechConfig(
                     voice_config=genai_types.VoiceConfig(
                         prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                            voice_name='zephyr',
+                            voice_name='leda',
                         )
                     )
                 ),
