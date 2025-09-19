@@ -20,7 +20,7 @@ from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSu
 config = context.config
 
 # Устанавливаем URL для подключения к БД из нашего конфига
-# config.set_main_option('sqlalchemy.url', DATABASE_URL)
+config.set_main_option('sqlalchemy.url', DATABASE_URL)
 
 # Проверяем, что config_file_name существует перед использованием
 if config.config_file_name is not None and os.path.exists(config.config_file_name):

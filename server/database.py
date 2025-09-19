@@ -9,6 +9,7 @@ from datetime import datetime, date
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import json
+import logging
 from sqlalchemy.dialects.postgresql import insert
 from config import DATABASE_URL, CHAT_HISTORY_LIMIT, REDIS_CLIENT
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
@@ -24,7 +25,7 @@ async_engine = create_async_engine(
 async_session_factory = async_sessionmaker(async_engine)
 
 # --- Константы для кэширования ---
-CACHE_TTL_SECONDS = 3600 # 1 час
+CACHE_TTL_SECONDS = 600 # 10 минут - оптимизированное значение
 
 def get_profile_cache_key(user_id: int) -> str:
     """Генерирует ключ для кэша профиля."""
@@ -70,7 +71,7 @@ async def get_profile(user_id: int) -> UserProfile | None:
                 return UserProfile(**profile_data)
         except Exception as e:
             # Логируем ошибку, но не прерываем выполнение, чтобы приложение могло работать без кэша
-            print(f"Ошибка при получении профиля из Redis для пользователя {user_id}: {e}")
+            logging.error(f"Ошибка при получении профиля из Redis для пользователя {user_id}: {e}")
 
     # Если в кэше нет или произошла ошибка, идем в БД
     try:
@@ -91,11 +92,11 @@ async def get_profile(user_id: int) -> UserProfile | None:
                 await REDIS_CLIENT.set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
             except Exception as e:
                 # Логируем ошибку, но не прерываем выполнение
-                print(f"Ошибка при сохранении профиля в Redis для пользователя {user_id}: {e}")
+                logging.error(f"Ошибка при сохранении профиля в Redis для пользователя {user_id}: {e}")
 
         return profile
     except Exception as e:
-        print(f"Ошибка при получении профиля из БД для пользователя {user_id}: {e}")
+        logging.error(f"Ошибка при получении профиля из БД для пользователя {user_id}: {e}")
         return None
 
 async def create_or_update_profile(user_id: int, data: dict):
@@ -113,7 +114,7 @@ async def create_or_update_profile(user_id: int, data: dict):
             await session.execute(stmt)
             await session.commit()
     except Exception as e:
-        print(f"Ошибка при создании/обновлении профиля в БД для пользователя {user_id}: {e}")
+        logging.error(f"Ошибка при создании/обновлении профиля в БД для пользователя {user_id}: {e}")
         raise
 
     # Инвалидируем кэш
@@ -123,7 +124,7 @@ async def create_or_update_profile(user_id: int, data: dict):
             await REDIS_CLIENT.delete(cache_key)
         except Exception as e:
             # Логируем ошибку, но не прерываем выполнение
-            print(f"Ошибка при удалении профиля из Redis для пользователя {user_id}: {e}")
+            logging.error(f"Ошибка при удалении профиля из Redis для пользователя {user_id}: {e}")
 
 async def delete_profile(user_id: int):
     """Удаляет профиль и инвалидирует кэш.
@@ -136,7 +137,7 @@ async def delete_profile(user_id: int):
             await session.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
             await session.commit()
     except Exception as e:
-        print(f"Ошибка при удалении профиля из БД для пользователя {user_id}: {e}")
+        logging.error(f"Ошибка при удалении профиля из БД для пользователя {user_id}: {e}")
         raise
 
     # Инвалидируем кэш
@@ -146,7 +147,7 @@ async def delete_profile(user_id: int):
             await REDIS_CLIENT.delete(cache_key)
         except Exception as e:
             # Логируем ошибку, но не прерываем выполнение
-            print(f"Ошибка при удалении профиля из Redis для пользователя {user_id}: {e}")
+            logging.error(f"Ошибка при удалении профиля из Redis для пользователя {user_id}: {e}")
 
 async def delete_chat_history(user_id: int):
     """Удаляет всю историю чата для пользователя.
@@ -193,12 +194,12 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
         
         # 2. Если факт уже существует, ничего не делаем и сообщаем об этом
         if existing_fact:
-            print(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
+            logging.info(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
             # Возвращаем информацию, что факт не был сохранен, т.к. уже есть
             return {"status": "skipped", "reason": "duplicate fact"}
 
         # 3. Если факта нет, сохраняем его
-        print(f"Сохранение нового факта для user_id {user_id}")
+        logging.info(f"Сохранение нового факта для user_id {user_id}")
         memory = LongTermMemory(
             user_id=user_id,
             fact=fact,
@@ -210,7 +211,7 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
 
 async def get_long_term_memories(user_id: int, query: str) -> dict:
     """Выполняет поиск по ключевым словам в долгосрочной памяти."""
-    print(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
+    logging.info(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
     try:
         async with async_session_factory() as session:
             # Используем ilike для регистронезависимого поиска
@@ -238,7 +239,7 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
         return {"memories": formatted_memories}
 
     except Exception as e:
-        print(f"Ошибка при поиске по ключевым словам для user_id {user_id}: {e}")
+        logging.error(f"Ошибка при поиске по ключевым словам для user_id {user_id}: {e}")
         return {"status": "error", "reason": "keyword_search_failed"}
 
 async def save_chat_message(user_id: int, role: str, content: str):
@@ -272,7 +273,7 @@ async def save_chat_message(user_id: int, role: str, content: str):
             cache_key = get_chat_messages_cache_key(user_id)
             await REDIS_CLIENT.delete(cache_key)
         except Exception as e:
-            print(f"Ошибка при удалении сообщений из Redis для пользователя {user_id}: {e}")
+            logging.error(f"Ошибка при удалении сообщений из Redis для пользователя {user_id}: {e}")
 
 async def get_latest_summary(user_id: int) -> ChatSummary | None:
     """Извлекает самую последнюю сводку для пользователя."""

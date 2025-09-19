@@ -240,7 +240,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             "get_long_term_memories": partial(get_long_term_memories, user_id),
         }
 
-        max_iterations = 5
+        max_iterations = 3  # Уменьшено для безопасности
         iteration_count = 0
         while iteration_count < max_iterations:
             iteration_count += 1
@@ -381,4 +381,4 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         raise
     except Exception as e:
         logging.error(f"Непредвиденная ошибка при вызове Gemini API для {user_id}: {e}", exc_info=True)
-        raise
+        raise

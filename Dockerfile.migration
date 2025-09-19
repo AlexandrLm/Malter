@@ -12,9 +12,6 @@ COPY alembic ./alembic
 COPY server ./server
 COPY config.py .
 
-# Убедитесь, что env переменные доступны
-ENV POSTGRES_USER=myuser
-ENV POSTGRES_PASSWORD=Al02082003
-ENV POSTGRES_DB=malterdb
+# Переменные окружения передаются через docker-compose
 
-CMD ["alembic", "upgrade", "head"]
+CMD ["alembic", "upgrade", "head"]

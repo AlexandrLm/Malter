@@ -33,14 +33,15 @@ async def get_limiter_key(request: Request) -> str:
     Если user_id не найден (например, для GET-запросов), возвращается к IP-адресу.
     """
     try:
-        # Пытаемся прочитать тело запроса как JSON
-        body = await request.json()
-        user_id = body.get("user_id")
-        if user_id:
-            return str(user_id)
-    except (json.JSONDecodeError, AttributeError):
+        # Проверяем, есть ли тело запроса
+        if request.method == "POST" and hasattr(request, "_body"):
+            body = await request.json()
+            user_id = body.get("user_id")
+            if user_id:
+                return str(user_id)
+    except (json.JSONDecodeError, AttributeError, ValueError, UnicodeDecodeError):
         # Если тело невалидно или это не POST-запрос, возвращаемся к IP
-        return get_remote_address(request)
+        pass
     # Возвращаемся к IP в качестве запасного варианта
     return get_remote_address(request)
 
@@ -287,4 +288,4 @@ async def get_profile_status_handler(user_id: int):
         logging.error(f"Ошибка в get_profile_status_handler для пользователя {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

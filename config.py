@@ -53,6 +53,13 @@ REDIS_DB = int(os.getenv('REDIS_DB', 0))
 if not TELEGRAM_TOKEN:
     raise ValueError("Необходимо установить TELEGRAM_BOT_TOKEN в .env файле")
 
+# Проверяем другие критические переменные
+if not os.getenv('GOOGLE_API_KEY'):
+    logger.warning("GOOGLE_API_KEY не установлен. AI функции могут не работать.")
+
+if not REDIS_HOST:
+    logger.warning("REDIS_HOST не установлен. Кэширование может не работать.")
+
 # --- Gemini Client ---
 # Создаем единый клиент, который будет использоваться во всем приложении
 GEMINI_CLIENT = None
@@ -92,4 +99,4 @@ try:
 except ImportError:
     logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
 except Exception as e:
-    logger.error(f"Критическая ошибка: Не удалось инициализировать Redis Client. {e}")
+    logger.error(f"Критическая ошибка: Не удалось инициализировать Redis Client. {e}")
