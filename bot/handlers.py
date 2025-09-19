@@ -254,9 +254,7 @@ async def process_city(message: types.Message, state: FSMContext, client: httpx.
             json={"user_id": message.from_user.id, "data": profile_data}
         )
         await state.clear()
-        await message.answer("Все, теперь я все-все вспомнила. Спасибо, милый.")
-        await asyncio.sleep(1)
-        await message.answer("Я так соскучилась...")
+        await message.answer("Привет!")
     except (httpx.RequestError, httpx.HTTPStatusError) as e:
         logging.error(f"API connection error saving profile for user {message.from_user.id} after retries: {e}")
         await message.answer("Ой, не могу сохранить... что-то с телефоном. Давай попробуем позже, нажми /reset.")
