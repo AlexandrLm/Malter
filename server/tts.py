@@ -20,21 +20,28 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
         logging.info(f"Генерация аудио для текста: '{text_to_speak}'...")
         
         response = await call_tts_api_with_retry(text_to_speak)
-
-        # Проверяем, что ответ содержит аудио данные
-        if not response.candidates or not response.candidates[0].content.parts or not response.candidates[0].content.parts[0].inline_data.data:
+        
+        # Получаем аудиоданные напрямую из ответа
+        if not response.candidates or not response.candidates[0].content.parts:
             logging.error("Ответ от TTS API не содержит аудиоданных.")
             return False
-
+        
         pcm_data = response.candidates[0].content.parts[0].inline_data.data
         logging.info("Аудиоданные (PCM) получены.")
         
-        audio_segment = AudioSegment(
-            data=pcm_data,
-            sample_width=2,      # 16-bit PCM
-            frame_rate=24000,    # 24kHz частота дискретизации
-            channels=1           # Моно
-        )
+        # Если получили WAV, конвертируем через pydub
+        if isinstance(pcm_data, bytes) and pcm_data.startswith(b'RIFF'):
+            # Это WAV файл, загружаем его
+            import io
+            audio_segment = AudioSegment.from_wav(io.BytesIO(pcm_data))
+        else:
+            # Это сырые PCM данные
+            audio_segment = AudioSegment(
+                data=pcm_data,
+                sample_width=2,      # 16-bit PCM
+                frame_rate=24000,    # 24kHz частота дискретизации
+                channels=1           # Моно
+            )
 
         logging.info("Конвертация в OGG/OPUS...")
         # Оборачиваем блокирующий вызов экспорта в to_thread, так как он работает с файловым объектом
@@ -42,9 +49,12 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
             audio_segment.export, out_f=output_file_object, format="ogg", codec="libopus"
         )
 
-        logging.info("Аудио успешно сконвертировано.")
+        logging.info(f"Аудио успешно сконвертировано. Размер PCM данных: {len(pcm_data)} байт")
         return True
 
+    except APIError as e:
+        logging.error(f"Ошибка TTS API: {e}")
+        return False
     except Exception as e:
         logging.error(f"Ошибка при создании голосового сообщения: {e}", exc_info=True)
         return False
@@ -61,16 +71,16 @@ async def call_tts_api_with_retry(text_to_speak: str):
     """
     logging.info("Попытка вызова TTS API...")
     try:
-        # Используем асинхронный метод aio
+        # Используем актуальную структуру API согласно документации
         response = await TTS_CLIENT.aio.models.generate_content(
-            model="gemini-2.5-flash-preview-tts", # Уточняем модель
+            model="gemini-2.5-flash-preview-tts",
             contents=text_to_speak,
             config=genai_types.GenerateContentConfig(
-                response_modalities=[genai_types.ResponseModality.AUDIO],
+                response_modalities=["AUDIO"],
                 speech_config=genai_types.SpeechConfig(
                     voice_config=genai_types.VoiceConfig(
                         prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                            voice_name='Leda',
+                            voice_name='zephyr',
                         )
                     )
                 ),

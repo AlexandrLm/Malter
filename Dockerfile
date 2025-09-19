@@ -11,10 +11,19 @@ ENV PYTHONUNBUFFERED 1
 COPY requirements.txt .
 RUN pip wheel --timeout=600 --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
 
+
 # --- Этап 2: Сборка финального образа ---
 FROM python:3.10.13-slim-bullseye
 
 WORKDIR /app
+
+# Обновляем список пакетов и устанавливаем ffmpeg.
+# Это системная зависимость, необходимая для библиотеки pydub.
+# Также чистим кэш apt, чтобы уменьшить размер итогового образа.
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+# -----------------------------
 
 # Копируем зависимости из builder'а
 COPY --from=builder /app/wheels /wheels

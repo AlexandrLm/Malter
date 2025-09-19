@@ -145,7 +145,10 @@ async def chat_handler(request: Request, chat: ChatRequest):
 
             if success:
                 voice_file_object.seek(0)  # "Перематываем" в начало, чтобы прочитать данные
-                voice_message_data = voice_file_object.read()
+                voice_message_bytes = voice_file_object.read()
+                # Кодируем бинарные данные в base64 для передачи в JSON
+                import base64
+                voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
                 VOICE_MESSAGES_GENERATED.inc()
             else:
                 # Если генерация не удалась, отправляем текстовый fallback
@@ -287,5 +290,30 @@ async def get_profile_status_handler(user_id: int):
     except Exception as e:
         logging.error(f"Ошибка в get_profile_status_handler для пользователя {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+@app.post("/test-tts", summary="Тест голосовых сообщений")
+async def test_tts(text: str = "Привет! Это тест голосового сообщения."):
+    """
+    Тестовый эндпоинт для проверки TTS функциональности.
+    """
+    import base64
+    voice_file_object = io.BytesIO()
+    success = await create_telegram_voice_message(text, voice_file_object)
+    
+    if success:
+        voice_file_object.seek(0)
+        voice_data = voice_file_object.read()
+        return {
+            "success": True,
+            "message": "TTS работает корректно",
+            "voice_size_bytes": len(voice_data),
+            "voice_data_base64": base64.b64encode(voice_data).decode('utf-8')
+        }
+    else:
+        return {
+            "success": False,
+            "message": "TTS не работает"
+        }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

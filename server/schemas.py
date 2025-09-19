@@ -36,11 +36,11 @@ class ChatResponse(BaseModel):
     
     Attributes:
         response_text (str): Текст ответа.
-        voice_message (bytes | None): Голосовое сообщение в формате bytes (опционально).
+        voice_message (str | None): Голосовое сообщение в формате base64 string (опционально).
         level_up_info (LevelUpInfo | None): Информация о повышении уровня (опционально).
     """
     response_text: str
-    voice_message: bytes | None = None
+    voice_message: str | None = None
     level_up_info: LevelUpInfo | None = None
 
 
