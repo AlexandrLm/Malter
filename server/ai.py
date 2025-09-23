@@ -381,4 +381,4 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         raise
     except Exception as e:
         logging.error(f"Непредвиденная ошибка при вызове Gemini API для {user_id}: {e}", exc_info=True)
-        raise
+        raise

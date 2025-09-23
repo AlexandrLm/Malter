@@ -3,7 +3,7 @@ import logging
 import os
 import asyncio
 import io
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Body
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory, ProfileStatus
@@ -121,6 +121,16 @@ async def chat_handler(request: Request, chat: ChatRequest):
     CHAT_REQUESTS.inc()
     
     try:
+        # Проверяем лимиты сообщений перед обработкой
+        limit_check = await check_message_limit(chat.user_id)
+        
+        if not limit_check["allowed"]:
+            # Если лимит превышен, возвращаем сообщение об ограничении
+            return ChatResponse(
+                response_text=limit_check["message"],
+                voice_message=None
+            )
+        
         # Замеряем время генерации ответа AI
         ai_start_time = time.time()
         response_text = await generate_ai_response(
@@ -315,5 +325,37 @@ async def test_tts(text: str = "Привет! Это тест голосовог
             "message": "TTS не работает"
         }
 
+@app.post("/activate_premium", summary="Активация премиум подписки", description="Активирует премиум подписку для пользователя.")
+async def activate_premium_handler(activate_request: dict = Body(...)):
+    """
+    Активирует премиум подписку для пользователя.
+    
+    Args:
+        activate_request (dict): {"user_id": int, "duration_days": int}
+        
+    Returns:
+        dict: {"success": bool, "message": str}
+    """
+    try:
+        user_id = activate_request.get("user_id")
+        duration_days = activate_request.get("duration_days", 30)
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id обязателен")
+        
+        success = await activate_premium_subscription(user_id, duration_days)
+        
+        if success:
+            return {"success": True, "message": f"Премиум подписка активирована на {duration_days} дней"}
+        else:
+            raise HTTPException(status_code=500, detail="Ошибка активации подписки")
+            
+    except ValueError as e:
+        logging.error(f"Ошибка валидации данных в activate_premium_handler: {e}")
+        raise HTTPException(status_code=400, detail="Неверные данные запроса")
+    except Exception as e:
+        logging.error(f"Ошибка в activate_premium_handler: {e}")
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

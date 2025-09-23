@@ -10,6 +10,8 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
+PAYMENT_CURRENCY = "RUB"
+PAYMENT_PHOTO_URL = os.getenv("PAYMENT_PHOTO_URL", "https://via.placeholder.com/400x200/6C5CE7/FFFFFF?text=Premium+EvolveAI")
 API_BASE_URL = "http://api:8000"
 # Чтобы переключиться на PostgreSQL, просто закомментируйте строку для SQLite
 # и раскомментируйте строку для PostgreSQL, указав свои данные.
@@ -44,6 +46,10 @@ SUMMARY_THRESHOLD = 26 # Количество сообщений для запу
 MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, которые будут взяты для создания сводки (и последующего удаления)
 CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
 DAILY_MESSAGE_LIMIT = 50 # Максимальное количество сообщений в день для бесплатных пользователей
+
+# Subscription settings
+SUBSCRIPTION_DEFAULT_DURATION = 30  # дней
+SUBSCRIPTION_EXPIRY_CHECK_HOURS = 24  # проверка истечения подписки каждые 24 часа
 
 TYPING_SPEED_CPS = int(os.getenv('TYPING_SPEED_CPS', 15))
 MIN_TYPING_DELAY = float(os.getenv('MIN_TYPING_DELAY', 0.5))

@@ -24,9 +24,7 @@ class GeolocationService:
             if location:
                 timezone = await loop.run_in_executor(
                     self.executor,
-                    self.tf.timezone_at,
-                    lng=location.longitude,
-                    lat=location.latitude
+                    lambda: self.tf.timezone_at(lng=location.longitude, lat=location.latitude)
                 )
                 return location, timezone
             return None, "UTC"

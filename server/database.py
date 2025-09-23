@@ -5,7 +5,7 @@
 включая операции CRUD для профилей пользователей, истории чата, долговременной памяти и сводок.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy import select, delete, desc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import json
@@ -359,3 +359,120 @@ async def get_all_user_ids() -> list[int]:
     except Exception as e:
         logging.error(f"Ошибка при получении списка всех пользователей: {e}")
         return []
+
+async def check_message_limit(user_id: int) -> dict:
+    """
+    Проверяет лимит сообщений для пользователя.
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        
+    Returns:
+        dict: {
+            "allowed": bool, 
+            "message": str, 
+            "count": int, 
+            "limit": int,
+            "plan": str
+        }
+    """
+    from config import DAILY_MESSAGE_LIMIT
+    
+    profile = await get_profile(user_id)
+    if not profile:
+        return {
+            "allowed": False, 
+            "message": "Профиль не найден. Используйте /start для создания профиля.", 
+            "count": 0, 
+            "limit": 0,
+            "plan": "none"
+        }
+    
+    # Проверяем, не истекла ли премиум подписка
+    await check_subscription_expiry(user_id)
+    
+    # Обновляем профиль после проверки истечения
+    profile = await get_profile(user_id)
+    
+    # Премиум пользователи не имеют ограничений
+    if (profile.subscription_plan == 'premium' and 
+        profile.subscription_expires and 
+        profile.subscription_expires > datetime.now()):
+        return {
+            "allowed": True, 
+            "message": "premium", 
+            "count": 0, 
+            "limit": 0,
+            "plan": "premium"
+        }
+    
+    # Проверяем лимит для бесплатных пользователей
+    if profile.daily_message_count >= DAILY_MESSAGE_LIMIT:
+        return {
+            "allowed": False, 
+            "message": f"Достигнут дневной лимит сообщений ({DAILY_MESSAGE_LIMIT}). Купите премиум для безлимитного общения!",
+            "count": profile.daily_message_count,
+            "limit": DAILY_MESSAGE_LIMIT,
+            "plan": "free"
+        }
+    
+    return {
+        "allowed": True, 
+        "message": "ok", 
+        "count": profile.daily_message_count, 
+        "limit": DAILY_MESSAGE_LIMIT,
+        "plan": "free"
+    }
+
+async def check_subscription_expiry(user_id: int) -> bool:
+    """
+    Проверяет и обновляет статус подписки при истечении.
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        
+    Returns:
+        bool: True если подписка активна, False если истекла или отсутствует.
+    """
+    profile = await get_profile(user_id)
+    if not profile:
+        return False
+    
+    if (profile.subscription_plan == 'premium' and 
+        profile.subscription_expires and 
+        profile.subscription_expires < datetime.now()):
+        
+        # Подписка истекла, переводим на бесплатный план
+        await create_or_update_profile(user_id, {
+            "subscription_plan": "free",
+            "subscription_expires": None
+        })
+        logging.info(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
+        return False
+    
+    return profile.subscription_plan == 'premium'
+
+async def activate_premium_subscription(user_id: int, duration_days: int = 30) -> bool:
+    """
+    Активирует премиум подписку для пользователя.
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        duration_days (int): Длительность подписки в днях.
+        
+    Returns:
+        bool: True если подписка успешно активирована.
+    """
+    try:
+        expires_at = datetime.now() + timedelta(days=duration_days)
+        
+        await create_or_update_profile(user_id, {
+            "subscription_plan": "premium",
+            "subscription_expires": expires_at
+        })
+        
+        logging.info(f"Активирована премиум подписка для пользователя {user_id} до {expires_at}")
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка активации премиум подписки для пользователя {user_id}: {e}")
+        return False
