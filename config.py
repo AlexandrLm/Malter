@@ -45,6 +45,10 @@ MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, ко
 CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
 DAILY_MESSAGE_LIMIT = 50 # Максимальное количество сообщений в день для бесплатных пользователей
 
+TYPING_SPEED_CPS = int(os.getenv('TYPING_SPEED_CPS', 15))
+MIN_TYPING_DELAY = float(os.getenv('MIN_TYPING_DELAY', 0.5))
+MAX_TYPING_DELAY = float(os.getenv('MAX_TYPING_DELAY', 4.0))
+
 # --- Redis Configuration ---
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
@@ -99,4 +103,4 @@ try:
 except ImportError:
     logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
 except Exception as e:
-    logger.error(f"Критическая ошибка: Не удалось инициализировать Redis Client. {e}")
+    logger.error(f"Критическая ошибка: Не удалось инициализировать Redis Client. {e}")
