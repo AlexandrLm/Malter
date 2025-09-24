@@ -193,6 +193,102 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
         return None
 
 
+async def prepare_chat_history(unsummarized_messages: list[ChatHistory], formatted_message: str, image_part: genai_types.Part | None) -> list[genai_types.Content]:
+    """
+    Подготавливает историю чата для Gemini API, включая ограничение по лимиту и добавление текущего сообщения пользователя.
+    
+    Args:
+        unsummarized_messages (list[ChatHistory]): Несуммаризированные сообщения из БД.
+        formatted_message (str): Отформатированное сообщение пользователя.
+        image_part (genai_types.Part | None): Часть с изображением, если есть.
+        
+    Returns:
+        list[genai_types.Content]: Готовая история чата.
+    """
+    history = create_history_from_messages(unsummarized_messages[-CHAT_HISTORY_LIMIT:])
+    
+    user_parts = [genai_types.Part.from_text(text=formatted_message)]
+    if image_part:
+        user_parts.insert(0, image_part)
+    
+    history.append(genai_types.Content(role='user', parts=user_parts))
+    return history
+
+
+async def manage_function_calls(response, history: list[genai_types.Content], available_functions: dict, user_id: int) -> bool:
+    """
+    Обрабатывает вызовы функций моделью Gemini.
+    
+    Args:
+        response: Ответ от Gemini API.
+        history (list[genai_types.Content]): Текущая история чата.
+        available_functions (dict): Доступные функции.
+        user_id (int): ID пользователя.
+        
+    Returns:
+        bool: True, если функция была вызвана и нужно продолжить итерацию, False иначе.
+    """
+    if not response.function_calls:
+        return False
+    
+    function_call = response.function_calls[0]
+    function_name = function_call.name
+    logging.info(f"Модель вызвала функцию: {function_name}")
+
+    if function_name not in available_functions:
+        logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
+        history.append(genai_types.Content(role="model", parts=[genai_types.Part.from_text(text=f"Вызвана неизвестная функция: {function_name}")]))
+        return True  # Продолжаем итерацию
+
+    function_to_call = available_functions[function_name]
+    function_args = dict(function_call.args)
+    logging.info(f"Аргументы функции: {function_args}")
+
+    function_response_data = await function_to_call(**function_args)
+    logging.info(f"Результат функции '{function_name}': {function_response_data}")
+
+    history.append(response.candidates[0].content)
+    history.append(genai_types.Content(
+        role="function",
+        parts=[genai_types.Part(
+            function_response=genai_types.FunctionResponse(
+                name=function_name,
+                response={"result": function_response_data},
+            )
+        )]
+    ))
+    
+    return True  # Продолжаем итерацию
+
+
+async def handle_final_response(response, user_id: int, candidate) -> str:
+    """
+    Обрабатывает финальный ответ от модели, включая fallback'ы для отсутствия текста.
+    
+    Args:
+        response: Ответ от Gemini API.
+        user_id (int): ID пользователя.
+        candidate: Кандидат ответа.
+        
+    Returns:
+        str: Финальный текст ответа.
+    """
+    final_response = ""
+    if response.text:
+        final_response = response.text.strip()
+    else:
+        finish_reason = candidate.finish_reason.name
+        logging.warning(f"Ответ от API для {user_id} не содержит текста. Причина: {finish_reason}")
+        if finish_reason == 'MAX_TOKENS':
+            final_response = "Ой, я так увлеклась, что мысль не поместилась в одно сообщение. Спроси еще раз, я попробую ответить короче."
+        elif finish_reason == 'SAFETY':
+            final_response = "Я не могу обсуждать эту тему, прости. Давай сменим тему?"
+        else:
+            final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+    
+    return final_response
+
+
 async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:
     """
     Генерирует ответ AI с использованием `generate_content`, сохраняя и извлекая историю чата из БД.
@@ -203,7 +299,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         logging.error("Клиент Gemini не инициализирован.")
         return "Произошла критическая ошибка конфигурации. Попробуйте еще раз позже."
 
-    uploaded_file = None
     try:
         # --- Параллельное извлечение данных из БД ---
         profile_task = get_profile(user_id)
@@ -221,18 +316,11 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
         formatted_message = format_user_message(user_message, profile, timestamp)
         system_instruction = build_system_instruction(profile, latest_summary)
-        # Ограничиваем количество сообщений, передаваемых в историю
-        history = create_history_from_messages(unsummarized_messages[-CHAT_HISTORY_LIMIT:])
-
-        user_parts = [genai_types.Part.from_text(text=formatted_message)]
-        image_part = await process_image_data(image_data, user_id)
-        if image_part:
-            user_parts.insert(0, image_part) # Вставляем картинку перед текстом
-        
-        history.append(genai_types.Content(role='user', parts=user_parts))
         await save_chat_message(user_id, 'user', formatted_message)
-
-       
+        
+        image_part = await process_image_data(image_data, user_id)
+        history = await prepare_chat_history(unsummarized_messages, formatted_message, image_part)
+ 
         tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
         
         available_functions = {
@@ -246,9 +334,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             iteration_count += 1
             contents = history
 
-            # print(contents)
-            # print(system_instruction)
-            
             response = await call_gemini_api_with_retry(
                 user_id=user_id,
                 model_name=MODEL_NAME,
@@ -257,7 +342,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 system_instruction=system_instruction,
                 thinking_budget=0
             )
-            logging.info(f"Сгенерирован ответ для пользователя {user_id}: '{response}'")
 
             if not response.candidates:
                 logging.warning(f"Ответ от API для пользователя {user_id} не содержит кандидатов.")
@@ -268,62 +352,24 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
             candidate = response.candidates[0]
 
-            if response.function_calls:
-                function_call = response.function_calls[0]
-                function_name = function_call.name
-                logging.info(f"Модель вызвала функцию: {function_name}")
-
-                if function_name not in available_functions:
-                    logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
-                    history.append({"role": "model", "parts": [{"text": f"Вызвана неизвестная функция: {function_name}"}]})
-                    formatted_message = "Произошла ошибка при вызове функции."
-                    continue
-
-                function_to_call = available_functions[function_name]
-                function_args = dict(function_call.args)
-                logging.info(f"Аргументы функции: {function_args}")
-
-                function_response_data = await function_to_call(**function_args)
-                logging.info(f"Результат функции '{function_name}': {function_response_data}")
-
-                history.append(candidate.content)
-                history.append(genai_types.Content(
-                    role="function",
-                    parts=[genai_types.Part(
-                        function_response=genai_types.FunctionResponse(
-                            name=function_name,
-                            response={"result": function_response_data},
-                        )
-                    )]
-                ))
-                
-                formatted_message = ""
+            if await manage_function_calls(response, history, available_functions, user_id):
                 continue
             
-            else:
-                # Этот блок теперь обрабатывает и response.text, и другие причины завершения
-                final_response = ""
-                if response.text:
-                    final_response = response.text.strip()
-                else:
-                    finish_reason = candidate.finish_reason.name
-                    logging.warning(f"Ответ от API для {user_id} не содержит текста. Причина: {finish_reason}")
-                    if finish_reason == 'MAX_TOKENS':
-                        final_response = "Ой, я так увлеклась, что мысль не поместилась в одно сообщение. Спроси еще раз, я попробую ответить короче."
-                    elif finish_reason == 'SAFETY':
-                        final_response = "Я не могу обсуждать эту тему, прости. Давай сменим тему?"
-                    else:
-                        final_response = "Я не могу сейчас ответить. Попробуй переформулировать."
+            final_response = await handle_final_response(response, user_id, candidate)
 
-                # --- Единая точка сохранения и запуска анализа ---
-                logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
-                await save_chat_message(user_id, 'model', final_response)
-                
-                from server.summarizer import generate_summary_and_analyze
-                asyncio.create_task(generate_summary_and_analyze(user_id))
-                # --------------------------------------------------
+            # --- Единая точка сохранения и запуска анализа ---
+            logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
+            await save_chat_message(user_id, 'model', final_response)
+            
+            from server.summarizer import generate_summary_and_analyze
+            asyncio.create_task(generate_summary_and_analyze(user_id))
+            # --------------------------------------------------
 
-                return final_response
+            # Log usage metadata for monitoring
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                logging.info(f"Gemini usage for user {user_id}: {response.usage_metadata}")
+
+            return final_response
 
         logging.warning(f"Достигнут лимит итераций ({max_iterations}) для пользователя {user_id}.")
         return "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое."
@@ -331,15 +377,6 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)
         return "Произошла внутренняя ошибка. Попробуйте еще раз позже."
-    finally:
-        # Гарантированное удаление файла после использования
-        if uploaded_file:
-            try:
-                logging.info(f"Удаление файла {uploaded_file.name} для пользователя {user_id}...")
-                await asyncio.to_thread(client.files.delete, name=uploaded_file.name)
-                logging.info(f"Файл {uploaded_file.name} успешно удален.")
-            except Exception as e:
-                logging.error(f"Не удалось удалить файл {uploaded_file.name}: {e}", exc_info=True)
 
 @retry(
     stop=stop_after_attempt(3),

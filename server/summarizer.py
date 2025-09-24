@@ -64,6 +64,39 @@ class SummaryAndAnalysisResponse(BaseModel):
     new_summary: str = Field(description="Краткая сводка диалога.")
     relationship_analysis: RelationshipAnalysis
 
+def parse_summary_json(response_text: str, user_id: int) -> dict | None:
+    """
+    Парсит JSON из ответа модели, с очисткой Markdown и валидацией через Pydantic.
+    
+    Args:
+        response_text (str): Текст ответа от модели.
+        user_id (int): ID пользователя для логирования.
+        
+    Returns:
+        dict | None: Распарсенные данные или None при ошибке.
+    """
+    try:
+        # Очищаем ответ от блоков кода Markdown
+        cleaned_text = response_text.strip()
+        if cleaned_text.startswith("```json"):
+            cleaned_text = cleaned_text[7:]
+        if cleaned_text.endswith("```"):
+            cleaned_text = cleaned_text[:-3]
+        
+        analysis_data = json.loads(cleaned_text)
+        
+        # Валидация через Pydantic
+        validated = SummaryAndAnalysisResponse.model_validate(analysis_data)
+        return validated.model_dump()
+        
+    except json.JSONDecodeError as e:
+        logging.error(f"Ошибка парсинга JSON для user_id {user_id}: {e}\n--- ОТВЕТ МОДЕЛИ ---\n{response_text}\n--------------------")
+        return None
+    except ValueError as e:  # Pydantic validation error
+        logging.error(f"Ошибка валидации JSON для user_id {user_id}: {e}")
+        return None
+
+
 async def generate_summary_and_analyze(user_id: int) -> str | None:
     """
     Генерирует сводку, анализирует отношения и обновляет профиль пользователя.
@@ -86,19 +119,14 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
             contents=prompt
         )
         
-        # Возвращаемся к ручному парсингу JSON с усиленным логированием
-        try:
-            # Очищаем ответ от блоков кода Markdown
-            cleaned_text = response.text.strip()
-            if cleaned_text.startswith("```json"):
-                cleaned_text = cleaned_text[7:]
-            if cleaned_text.endswith("```"):
-                cleaned_text = cleaned_text[:-3]
-            
-            analysis_data = json.loads(cleaned_text)
-        except json.JSONDecodeError as e:
-            logging.error(f"Критическая ошибка парсинга JSON от Gemma-3 для user_id {user_id}: {e}\n--- ОТВЕТ МОДЕЛИ ---\n{response.text}\n--------------------")
-            return None # Прерываем выполнение, если JSON невалидный
+        # Log usage metadata for monitoring
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            logging.info(f"Gemini summarizer usage for user {user_id}: {response.usage_metadata}")
+        
+        analysis_data = parse_summary_json(response.text, user_id)
+        if not analysis_data:
+            logging.warning(f"Не удалось распарсить анализ для user_id {user_id}. Пропускаем обновление.")
+            return None
 
         new_summary = analysis_data.get("new_summary")
         relationship_analysis = analysis_data.get("relationship_analysis", {})
@@ -120,5 +148,5 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         return new_summary
 
     except Exception as e:
-        logging.error(f"Ошибка при анализе для user_id {user_id}: {e}")
+        logging.error(f"Ошибка при анализе для user_id {user_id}: {e}", exc_info=True)
         return None

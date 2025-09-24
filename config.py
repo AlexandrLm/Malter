@@ -111,3 +111,8 @@ except ImportError:
     logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
 except Exception as e:
     logger.error(f"Критическая ошибка: Не удалось инициализировать Redis Client. {e}")
+
+# JWT Configuration
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = 60  # Token expires in 1 hour

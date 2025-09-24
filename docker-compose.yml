@@ -6,6 +6,8 @@ services:
     restart: always
     env_file:
       - .env
+    volumes:
+      - .env:/app/.env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -45,6 +47,8 @@ services:
     restart: always
     env_file:
       - .env
+    volumes:
+      - .env:/app/.env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379

@@ -4,7 +4,7 @@ from aiogram import Router, F, types
 from aiogram.enums import ChatAction
 from aiogram.fsm.context import FSMContext
 from ..services.image_processor import process_image
-from ..services.api_client import make_api_request
+from ..services.api_client import make_api_request, get_token
 from ..services.response_handler import send_response
 
 router = Router()
@@ -27,8 +27,10 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
         # Текст сообщения (или подпись к фото)
         text = message.text or message.caption or ""
 
+        # Get JWT token for the user
+        token = await get_token(client, user_id)
+        
         payload = {
-            "user_id": user_id,
             "message": text,
             "timestamp": message.date.isoformat(),
             "image_data": image_data_b64  # Добавляем base64 картинки
@@ -39,6 +41,7 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
             "post",
             "/chat",
             user_id=user_id,
+            token=token,
             json=payload,
             timeout=180.0  # Увеличиваем таймаут для обработки изображений
         )

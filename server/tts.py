@@ -21,6 +21,10 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
         
         response = await call_tts_api_with_retry(text_to_speak)
         
+        # Log usage metadata for monitoring
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            logging.info(f"Gemini TTS usage: {response.usage_metadata}")
+        
         # Получаем аудиоданные напрямую из ответа
         if not response.candidates or not response.candidates[0].content.parts:
             logging.error("Ответ от TTS API не содержит аудиоданных.")

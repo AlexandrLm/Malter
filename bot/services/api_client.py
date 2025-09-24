@@ -42,9 +42,25 @@ def handle_api_errors(func):
     retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
     reraise=True
 )
-async def make_api_request(client: httpx.AsyncClient, method: str, endpoint: str, user_id: int = None, **kwargs):
-    """Централизованная функция для выполнения запросов к API."""
+async def get_token(client: httpx.AsyncClient, user_id: int) -> str:
+    """Получает JWT токен для пользователя."""
+    try:
+        response = await client.post(f"{API_BASE_URL}/auth", json={"user_id": user_id})
+        response.raise_for_status()
+        data = response.json()
+        return data["access_token"]
+    except Exception as e:
+        logger.error(f"Error getting token for user {user_id}: {e}")
+        raise
+
+async def make_api_request(client: httpx.AsyncClient, method: str, endpoint: str, user_id: int = None, token: str = None, **kwargs):
+    """Централизованная функция для выполнения запросов к API с поддержкой JWT."""
     url = f"{API_BASE_URL}{endpoint}"
+    headers = kwargs.pop("headers", {})
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        kwargs["headers"] = headers
+    
     start_time = time.perf_counter()
     logger.info(f"API request start - user_id: {user_id}, method: {method.upper()}, endpoint: {endpoint}")
     response = await client.request(method, url, **kwargs)

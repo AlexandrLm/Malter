@@ -15,6 +15,14 @@ from server.database import get_profile, create_or_update_profile, delete_profil
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory, ProfileStatus
+import config
+
+# JWT imports
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from fastapi import Depends, HTTPException, status, Body
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # --- Метрики Prometheus ---
 from starlette_prometheus import PrometheusMiddleware, metrics
@@ -60,6 +68,42 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# JWT setup
+security = HTTPBearer()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+SECRET_KEY = config.JWT_SECRET
+ALGORITHM = config.JWT_ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = config.JWT_EXPIRE_MINUTES
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if sub is None:
+            raise credentials_exception
+        user_id: int = int(sub)
+        if user_id is None:
+            raise credentials_exception
+    except JWTError as je:
+        logging.error(f"JWT Debug Error: {str(je)}")
+        raise credentials_exception
+    return user_id
+
 # --- Метрики Prometheus ---
 from starlette_prometheus import PrometheusMiddleware, metrics
 app.add_middleware(PrometheusMiddleware)
@@ -83,6 +127,27 @@ async def health_check():
     """
     return {"status": "ok"}
 
+@app.post("/auth", summary="Генерация JWT токена", description="Создает JWT токен для пользователя по user_id (для внутреннего использования бота).")
+async def auth_endpoint(auth_data: dict = Body(...)):
+    """
+    Генерирует JWT токен для аутентификации API запросов.
+    
+    Args:
+        auth_data (dict): {"user_id": int}
+        
+    Returns:
+        dict: {"access_token": str, "token_type": "bearer"}
+    """
+    user_id = auth_data.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(user_id)}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.get("/ready", status_code=200, summary="Проверка готовности", description="Проверяет, готов ли сервис к приему трафика, включая подключение к базе данных.")
 async def ready_check():
     """
@@ -101,15 +166,21 @@ async def ready_check():
         logging.error(f"Проверка готовности не пройдена: не удалось подключиться к БД. Ошибка: {e}")
         raise HTTPException(status_code=503, detail="Service Unavailable")
 
-@app.post("/chat", response_model=ChatResponse, summary="Обработка чат-сообщения", description="Принимает сообщение от пользователя и возвращает ответ от AI.")
+@app.post("/chat", response_model=ChatResponse, summary="Обработка чат-сообщения", description="Принимает сообщение от пользователя и возвращает ответ от AI. Требует JWT токен в заголовке Authorization.")
 @limiter.limit("10/minute")
-async def chat_handler(request: Request, chat: ChatRequest):
+async def chat_handler(
+    request: Request,
+    chat: ChatRequest,
+    user_id: int = Depends(verify_token)
+):
     """
     Обрабатывает входящее сообщение от пользователя и генерирует ответ с помощью AI.
+    user_id извлекается из JWT токена для безопасности.
     
     Args:
         request (Request): Объект запроса FastAPI.
-        chat (ChatRequest): Данные чат-запроса, включая user_id, сообщение, временную метку и данные изображения (если есть).
+        chat (ChatRequest): Данные чат-запроса, включая сообщение, временную метку и данные изображения (user_id игнорируется, используется из токена).
+        user_id (int): ID пользователя из JWT токена.
         
     Returns:
         ChatResponse: Ответ, содержащий текст сообщения и, при необходимости, голосовое сообщение.
@@ -122,7 +193,7 @@ async def chat_handler(request: Request, chat: ChatRequest):
     
     try:
         # Проверяем лимиты сообщений перед обработкой
-        limit_check = await check_message_limit(chat.user_id)
+        limit_check = await check_message_limit(user_id)
         
         if not limit_check["allowed"]:
             # Если лимит превышен, возвращаем сообщение об ограничении
@@ -134,7 +205,7 @@ async def chat_handler(request: Request, chat: ChatRequest):
         # Замеряем время генерации ответа AI
         ai_start_time = time.time()
         response_text = await generate_ai_response(
-            user_id=chat.user_id,
+            user_id=user_id,
             user_message=chat.message,
             timestamp=chat.timestamp,
             image_data=chat.image_data
@@ -168,11 +239,11 @@ async def chat_handler(request: Request, chat: ChatRequest):
         return ChatResponse(response_text=response_text, voice_message=voice_message_data)
 
     except ValueError as e:
-        logging.error(f"Ошибка валидации данных в chat_handler для пользователя {chat.user_id}: {e}")
+        logging.error(f"Ошибка валидации данных в chat_handler для пользователя {user_id}: {e}")
         CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
         raise HTTPException(status_code=400, detail="Неверные данные запроса")
     except Exception as e:
-        logging.error(f"Ошибка в chat_handler для пользователя {chat.user_id}: {e}")
+        logging.error(f"Ошибка в chat_handler для пользователя {user_id}: {e}")
         CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 

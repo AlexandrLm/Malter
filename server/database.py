@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import json
 import logging
 from sqlalchemy.dialects.postgresql import insert
+import bleach  # For text sanitization
 from config import DATABASE_URL, CHAT_HISTORY_LIMIT, REDIS_CLIENT
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
 
@@ -243,7 +244,11 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
         return {"status": "error", "reason": "keyword_search_failed"}
 
 async def save_chat_message(user_id: int, role: str, content: str):
-    """Сохраняет одно сообщение в историю чата и обновляет счетчик ежедневных сообщений."""
+    """Сохраняет одно сообщение в историю чата и обновляет счетчик ежедневных сообщений.
+    Добавлена санитизация текста с bleach для безопасности."""
+    # Sanitize content to prevent XSS/prompt injection
+    sanitized_content = bleach.clean(content, tags=[], strip=True)
+    
     today = date.today()
     async with async_session_factory() as session:
         # Обновляем счетчик ежедневных сообщений
@@ -262,7 +267,7 @@ async def save_chat_message(user_id: int, role: str, content: str):
             session.add(profile)
         
         # Сохраняем сообщение в истории чата
-        message = ChatHistory(user_id=user_id, role=role, content=content)
+        message = ChatHistory(user_id=user_id, role=role, content=sanitized_content)
         session.add(message)
         
         await session.commit()

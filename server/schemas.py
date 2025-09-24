@@ -7,12 +7,12 @@ class ChatRequest(BaseModel):
     Модель запроса для обработки чат-сообщения.
     
     Attributes:
-        user_id (int): Уникальный идентификатор пользователя.
+        user_id (int | None): Уникальный идентификатор пользователя (опционально, из токена).
         message (str): Текст сообщения пользователя.
         timestamp (datetime): Временная метка сообщения.
         image_data (str | None): Данные изображения в формате base64 (опционально).
     """
-    user_id: int
+    user_id: int | None = None
     message: str
     timestamp: datetime
     image_data: str | None = None
