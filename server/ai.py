@@ -69,6 +69,21 @@ get_memories_function = {
     }
 }
 
+generate_image_function = {
+    "name": "generate_image",
+    "description": "Generate an image based on a text prompt. Use this tool when the user requests a picture, visualization, diagram, or any creative image to illustrate your response. Only use if it enhances the conversation meaningfully.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "A detailed, descriptive prompt for the image generation. Be specific about style, content, and details."
+            }
+        },
+        "required": ["prompt"]
+    }
+}
+
 def generate_user_prompt(profile: UserProfile) -> str:
     """
     Генерирует часть системного промпта с информацией о пользователе.
@@ -238,7 +253,7 @@ async def prepare_chat_history(unsummarized_messages: list[ChatHistory], formatt
     return history
 
 
-async def manage_function_calls(response, history: list[genai_types.Content], available_functions: dict, user_id: int) -> bool:
+async def manage_function_calls(response, history: list[genai_types.Content], available_functions: dict, user_id: int) -> str | None:
     """
     Обрабатывает вызовы функций моделью Gemini.
     
@@ -249,10 +264,10 @@ async def manage_function_calls(response, history: list[genai_types.Content], av
         user_id (int): ID пользователя.
         
     Returns:
-        bool: True, если функция была вызвана и нужно продолжить итерацию, False иначе.
+        str | None: Base64 image data if generate_image was called, else None.
     """
     if not response.function_calls:
-        return False
+        return None
     
     function_call = response.function_calls[0]
     function_name = function_call.name
@@ -261,14 +276,14 @@ async def manage_function_calls(response, history: list[genai_types.Content], av
     if function_name not in available_functions:
         logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
         history.append(genai_types.Content(role="model", parts=[genai_types.Part.from_text(text=f"Вызвана неизвестная функция: {function_name}")]))
-        return True  # Продолжаем итерацию
+        return None
 
     function_to_call = available_functions[function_name]
     function_args = dict(function_call.args)
     logging.info(f"Аргументы функции: {function_args}")
 
     function_response_data = await function_to_call(**function_args)
-    logging.info(f"Результат функции '{function_name}': {function_response_data}")
+    logging.info(f"Результат функции '{function_name}': {function_response_data if function_name != 'generate_image' else 'Image generated'}")
 
     history.append(response.candidates[0].content)
     history.append(genai_types.Content(
@@ -281,7 +296,9 @@ async def manage_function_calls(response, history: list[genai_types.Content], av
         )]
     ))
     
-    return True  # Продолжаем итерацию
+    if function_name == "generate_image":
+        return function_response_data
+    return None
 
 
 async def handle_final_response(response, user_id: int, candidate) -> str:
@@ -335,28 +352,30 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 
         if not profile:
             logging.error(f"Профиль пользователя {user_id} не найден!")
-            return "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение."
-
+            return {"text": "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение.", "image_base64": None}
+    
         formatted_message = format_user_message(user_message, profile, timestamp)
         system_instruction = build_system_instruction(profile, latest_summary)
         await save_chat_message(user_id, 'user', formatted_message)
         
         image_part = await process_image_data(image_data, user_id)
         history = await prepare_chat_history(unsummarized_messages, formatted_message, image_part)
- 
-        tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function])
+    
+        tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function, generate_image_function])
         
         available_functions = {
             "save_long_term_memory": partial(save_long_term_memory, user_id),
             "get_long_term_memories": partial(get_long_term_memories, user_id),
+            "generate_image": generate_image,
         }
-
+    
         max_iterations = 3  # Уменьшено для безопасности
         iteration_count = 0
+        image_b64 = None
         while iteration_count < max_iterations:
             iteration_count += 1
             contents = history
-
+    
             response = await call_gemini_api_with_retry(
                 user_id=user_id,
                 model_name=MODEL_NAME,
@@ -365,21 +384,23 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 system_instruction=system_instruction,
                 thinking_budget=0
             )
-
+    
             if not response.candidates:
                 logging.warning(f"Ответ от API для пользователя {user_id} не содержит кандидатов.")
                 if response.prompt_feedback and response.prompt_feedback.block_reason:
                     logging.error(f"Запрос для {user_id} заблокирован: {response.prompt_feedback.block_reason_message}")
-                    return f"Я не могу ответить на это. Запрос был заблокирован."
-                return "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности."
-
+                    return {"text": "Я не могу ответить на это. Запрос был заблокирован.", "image_base64": None}
+                return {"text": "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности.", "image_base64": None}
+    
             candidate = response.candidates[0]
-
-            if await manage_function_calls(response, history, available_functions, user_id):
+    
+            tool_image = await manage_function_calls(response, history, available_functions, user_id)
+            if tool_image:
+                image_b64 = tool_image
                 continue
             
             final_response = await handle_final_response(response, user_id, candidate)
-
+    
             # --- Единая точка сохранения и запуска анализа ---
             logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
             await save_chat_message(user_id, 'model', final_response)
@@ -387,19 +408,19 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             from server.summarizer import generate_summary_and_analyze
             asyncio.create_task(generate_summary_and_analyze(user_id))
             # --------------------------------------------------
-
+    
             # Log usage metadata for monitoring
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
                 logging.info(f"Gemini usage for user {user_id}: {response.usage_metadata}")
-
-            return final_response
-
+    
+            return {"text": final_response, "image_base64": image_b64}
+    
         logging.warning(f"Достигнут лимит итераций ({max_iterations}) для пользователя {user_id}.")
-        return "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое."
-
+        return {"text": "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое.", "image_base64": None}
+    
     except Exception as e:
         logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)
-        return "Произошла внутренняя ошибка. Попробуйте еще раз позже."
+        return {"text": "Произошла внутренняя ошибка. Попробуйте еще раз позже.", "image_base64": None}
 
 @retry(
     stop=stop_after_attempt(3),
@@ -441,4 +462,34 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         raise
     except Exception as e:
         logging.error(f"Непредвиденная ошибка при вызове Gemini API для {user_id}: {e}", exc_info=True)
+        raise
+
+
+async def generate_image(prompt: str) -> str:
+    """
+    Generates an image using the Gemini preview model and returns base64 encoded data.
+    
+    Args:
+        prompt (str): Text description for the image.
+        
+    Returns:
+        str: Base64 encoded image data.
+    """
+    try:
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash-image-preview",
+            contents=[prompt],
+        )
+        
+        if response.candidates:
+            for part in response.candidates[0].content.parts:
+                if part.inline_data is not None:
+                    image_data = part.inline_data.data
+                    image_b64 = base64.b64encode(image_data).decode('utf-8')
+                    logging.info(f"Image generated successfully for prompt: {prompt[:50]}...")
+                    return image_b64
+        
+        raise ValueError("Image generation failed: No image data in response")
+    except Exception as e:
+        logging.error(f"Error generating image: {e}")
         raise

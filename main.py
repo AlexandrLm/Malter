@@ -205,13 +205,16 @@ async def chat_handler(
         
         # Замеряем время генерации ответа AI
         ai_start_time = time.time()
-        response_text = await generate_ai_response(
+        ai_response = await generate_ai_response(
             user_id=user_id,
             user_message=chat.message,
             timestamp=chat.timestamp,
             image_data=chat.image_data
         )
         AI_RESPONSE_DURATION.observe(time.time() - ai_start_time)
+
+        response_text = ai_response['text']
+        image_base64 = ai_response.get('image_base64')
 
         # Premium TTS guard: Check subscription status for [VOICE] handling
         await check_subscription_expiry(user_id)
@@ -255,7 +258,7 @@ async def chat_handler(
                     response_text = "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!"
 
         CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
-        return ChatResponse(response_text=response_text, voice_message=voice_message_data)
+        return ChatResponse(response_text=response_text, voice_message=voice_message_data, image_base64=image_base64)
 
     except ValueError as e:
         logging.error(f"Ошибка валидации данных в chat_handler для пользователя {user_id}: {e}")
