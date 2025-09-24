@@ -22,6 +22,10 @@ async def send_response(message: Message, response_data: dict):
             await message.answer_voice(BufferedInputFile(voice_bytes, "voice.ogg"))
         except Exception as e:
             logger.error(f"Error sending voice message to user {message.from_user.id}: {e}")
-            await message.answer("Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!")
+            await message.answer("Я хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!")
     else:
-        await send_typing_response(message, response_data["response_text"])
+        if 'response_text' in response_data:
+            await send_typing_response(message, response_data["response_text"])
+        else:
+            logger.warning(f"No response_text in response_data for user {message.from_user.id}")
+            await message.answer("Извини, не могу придумать, что сказать... Расскажи еще!")

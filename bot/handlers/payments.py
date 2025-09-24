@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+import httpx
 from aiogram import Router, types, F
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 from aiogram.filters import Command
@@ -18,7 +18,6 @@ SUBSCRIPTION_PRICES = {
 }
 
 @router.message(Command("buy_premium"))
-@handle_api_errors
 async def buy_premium_command(message: types.Message):
     """Показывает варианты премиум подписки"""
     if not PAYMENT_PROVIDER_TOKEN:
@@ -51,7 +50,7 @@ async def buy_premium_command(message: types.Message):
         "🎁 *Скидки за длительную подписку!*"
     )
     
-    await message.answer(premium_info, reply_markup=keyboard, parse_mode='Markdown')
+    await message.answer(premium_info, reply_markup=keyboard, parse_mode='MarkdownV2')
 
 @router.callback_query(F.data.startswith("buy_"))
 async def handle_subscription_choice(callback: types.CallbackQuery):
@@ -105,15 +104,15 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
 
 @router.message(F.successful_payment)
-async def successful_payment_handler(message: types.Message):
+async def successful_payment_handler(message: types.Message, client: httpx.AsyncClient):
     """Обработка успешного платежа"""
     payment = message.successful_payment
     user_id = message.from_user.id
     
     try:
         # Извлекаем тип подписки из payload
-        payload_parts = payment.invoice_payload.split("_")
-        subscription_type = payload_parts[1] + "_" + payload_parts[2]  # "1_month", "3_months", etc.
+        payload_parts = payment.invoice_payload.split("_", 2)
+        subscription_type = payload_parts[1]  # "1_month", "3_months", etc.
         
         duration_days = {
             "1_month": 30,
@@ -126,10 +125,11 @@ async def successful_payment_handler(message: types.Message):
         
         # Активируем подписку через API
         response = await make_api_request(
-            message.bot.get("httpx_client"),
+            client,
             "post",
             "/activate_premium",
-            json={"user_id": user_id, "duration_days": days}
+            user_id=user_id,
+            json={"user_id": user_id, "duration_days": days, "charge_id": payment.telegram_payment_charge_id}
         )
         
         if response.status_code == 200:
@@ -144,7 +144,7 @@ async def successful_payment_handler(message: types.Message):
                 f"Спасибо за поддержку! ❤️"
             )
             
-            await message.answer(success_message, parse_mode='Markdown')
+            await message.answer(success_message, parse_mode='MarkdownV2')
             
             # Логируем успешную покупку
             logger.info(f"Успешная покупка премиум подписки пользователем {user_id} на {days} дней")

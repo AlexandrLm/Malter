@@ -38,6 +38,7 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
             client,
             "post",
             "/chat",
+            user_id=user_id,
             json=payload,
             timeout=180.0  # Увеличиваем таймаут для обработки изображений
         )

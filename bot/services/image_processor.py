@@ -1,6 +1,7 @@
 import base64
 import logging
 from aiogram.types import Message
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
@@ -23,17 +24,17 @@ async def process_image(message: Message) -> str | None:
         # Выбираем лучшее качество (последнее в списке)
         photo = message.photo[-1]
         # Скачиваем фото в память
-        photo_bytes = await message.bot.download(photo.file_id)
-        if photo_bytes:
-            # Проверяем размер правильно для BytesIO
-            photo_bytes.seek(0, 2)  # Переходим в конец файла
-            file_size = photo_bytes.tell()  # Получаем размер
-            photo_bytes.seek(0)  # Возвращаемся в начало
-            
-            if file_size > MAX_IMAGE_SIZE:
-                logger.warning(f"Image too large for user {message.from_user.id}: {file_size} bytes")
-                return None
-            return base64.b64encode(photo_bytes.read()).decode('utf-8')
+        photo_bytes = BytesIO()
+        await message.bot.download(photo, destination=photo_bytes)
+        photo_bytes.seek(0)
+        
+        # Проверяем размер
+        file_size = len(photo_bytes.getvalue())
+        
+        if file_size > MAX_IMAGE_SIZE:
+            logger.warning(f"Image too large for user {message.from_user.id}: {file_size} bytes")
+            return None
+        return base64.b64encode(photo_bytes.getvalue()).decode('utf-8')
     except Exception as e:
         logger.error(f"Error processing image for user {message.from_user.id}: {e}")
         return None

@@ -78,6 +78,7 @@ async def process_city(message: types.Message, state: FSMContext, client: httpx.
             client,
             "post",
             "/profile",
+            user_id=message.from_user.id,
             json={"user_id": message.from_user.id, "data": profile_data}
         )
         await state.clear()

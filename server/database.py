@@ -452,26 +452,42 @@ async def check_subscription_expiry(user_id: int) -> bool:
     
     return profile.subscription_plan == 'premium'
 
-async def activate_premium_subscription(user_id: int, duration_days: int = 30) -> bool:
+async def activate_premium_subscription(user_id: int, duration_days: int = 30, charge_id: str = None) -> bool:
     """
-    Активирует премиум подписку для пользователя.
+    Активирует премиум подписку для пользователя с проверкой идемпотентности по charge_id.
     
     Args:
         user_id (int): Уникальный идентификатор пользователя.
         duration_days (int): Длительность подписки в днях.
+        charge_id (str, optional): ID платежа для проверки идемпотентности.
         
     Returns:
-        bool: True если подписка успешно активирована.
+        bool: True если подписка успешно активирована или уже была активирована.
     """
     try:
+        profile = await get_profile(user_id)
+        if not profile:
+            # Создаем профиль если не существует
+            await create_or_update_profile(user_id, {})
+            profile = await get_profile(user_id)
+
+        # Проверяем идемпотентность
+        if charge_id and profile.last_processed_payment_charge_id == charge_id:
+            logging.info(f"Платеж {charge_id} для пользователя {user_id} уже обработан")
+            return True
+
         expires_at = datetime.now() + timedelta(days=duration_days)
         
-        await create_or_update_profile(user_id, {
+        update_data = {
             "subscription_plan": "premium",
             "subscription_expires": expires_at
-        })
+        }
+        if charge_id:
+            update_data["last_processed_payment_charge_id"] = charge_id
+
+        await create_or_update_profile(user_id, update_data)
         
-        logging.info(f"Активирована премиум подписка для пользователя {user_id} до {expires_at}")
+        logging.info(f"Активирована премиум подписка для пользователя {user_id} до {expires_at} (charge_id: {charge_id})")
         return True
     except Exception as e:
         logging.error(f"Ошибка активации премиум подписки для пользователя {user_id}: {e}")

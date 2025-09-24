@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 @handle_api_errors
 async def command_start(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
     user_id = message.from_user.id
-    response = await make_api_request(client, "get", f"/profile/{user_id}")
-    if response.status_code == 200 and response.json() is not None:
+    response = await make_api_request(client, "get", f"/profile/{user_id}", user_id=user_id)
+    data = response.json()
+    if data is not None:
         await message.answer("Привет, милый. Я так рада, что ты написал. Уже успела соскучиться.")
         await state.clear()
     else:
@@ -28,7 +29,7 @@ async def command_start(message: types.Message, state: FSMContext, client: httpx
 @handle_api_errors
 async def command_reset(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
     user_id = message.from_user.id
-    await make_api_request(client, "delete", f"/profile/{user_id}")
+    await make_api_request(client, "delete", f"/profile/{user_id}", user_id=user_id)
     await message.answer("Хм, хочешь начать все с чистого листа? Хорошо...")
     await asyncio.sleep(1)
     await message.answer("Давай начнем сначала. Как тебя зовут?")
@@ -38,60 +39,55 @@ async def command_reset(message: types.Message, state: FSMContext, client: httpx
 @handle_api_errors
 async def command_status(message: types.Message, client: httpx.AsyncClient):
     user_id = message.from_user.id
-    response = await make_api_request(client, "get", f"/profile/status/{user_id}")
-    
-    if response.status_code == 200:
-        data = response.json()
-        if data:
-            plan = data['subscription_plan']
-            expires = data['subscription_expires']
-            count = data['daily_message_count']
-            limit = DAILY_MESSAGE_LIMIT
-            
-            status_text = f" *Статус подписки*\n\n"
-            
-            if plan == 'premium' and expires:
-                try:
-                    from datetime import datetime
-                    exp_date = datetime.fromisoformat(expires.replace('Z', '+00:00'))
-                    days_left = (exp_date - datetime.now()).days
-                    
-                    status_text += f"✨ *Премиум подписка*\n"
-                    status_text += f"Действует до: {expires.split('T')[0]}\n"
-                    status_text += f"Осталось дней: {max(0, days_left)}\n\n"
-                    status_text += f"💎 *Преимущества:*\n"
-                    status_text += f"• Unlimited сообщений ✅\n"
-                    status_text += f"• Продвинутая память ✅\n"
-                    status_text += f"• Голосовые сообщения ✅\n"
-                    status_text += f"• Доступ к платным уровням ✅"
-                    
-                    if days_left <= 7:
-                        status_text += f"\n\n⚠️ Подписка скоро истекает! Продлите для продолжения премиум функций."
-                        
-                except Exception as e:
-                    status_text += f"✨ *Премиум подписка*\n"
-                    status_text += f"Действует до: {expires.split('T')[0]}\n"
-                    status_text += f"Unlimited сообщений ✅"
-            else:
-                status_text += f"🆓 *Бесплатный план*\n"
-                status_text += f"Сообщений сегодня: {count}/{limit}\n"
-                status_text += f"Осталось: {max(0, limit - count)}\n\n"
+    response = await make_api_request(client, "get", f"/profile/status/{user_id}", user_id=user_id)
+    data = response.json()
+    if data:
+        plan = data['subscription_plan']
+        expires = data['subscription_expires']
+        count = data['daily_message_count']
+        limit = DAILY_MESSAGE_LIMIT
+        
+        status_text = f" *Статус подписки*\n\n"
+        
+        if plan == 'premium' and expires:
+            try:
+                exp_date = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                days_left = (exp_date - datetime.now()).days
                 
-                if count >= limit * 0.8:  # 80% от лимита
-                    status_text += f"⚠️ Вы использовали {count}/{limit} сообщений!\n"
+                status_text += f"✨ *Премиум подписка*\n"
+                status_text += f"Действует до: {expires.split('T')[0]}\n"
+                status_text += f"Осталось дней: {max(0, days_left)}\n\n"
+                status_text += f"💎 *Преимущества:*\n"
+                status_text += f"• Unlimited сообщений ✅\n"
+                status_text += f"• Продвинутая память ✅\n"
+                status_text += f"• Голосовые сообщения ✅\n"
+                status_text += f"• Доступ к платным уровням ✅"
                 
-                status_text += f"💎 *Премиум включает:*\n"
-                status_text += f"• Unlimited сообщений\n"
-                status_text += f"• Продвинутая память\n"
-                status_text += f"• Голосовые сообщения\n"
-                status_text += f"• Доступ к платным уровням отношений\n\n"
-                status_text += f"Используйте /buy_premium для покупки!"
-            
-            await message.answer(status_text, parse_mode=None)
+                if days_left <= 7:
+                    status_text += f"\n\n⚠️ Подписка скоро истекает! Продлите для продолжения премиум функций."
+                    
+            except Exception as e:
+                status_text += f"✨ *Премиум подписка*\n"
+                status_text += f"Действует до: {expires.split('T')[0]}\n"
+                status_text += f"Unlimited сообщений ✅"
         else:
-            await message.answer("Профиль не найден. Пожалуйста, используй /start.")
+            status_text += f"🆓 *Бесплатный план*\n"
+            status_text += f"Сообщений сегодня: {count}/{limit}\n"
+            status_text += f"Осталось: {max(0, limit - count)}\n\n"
+            
+            if count >= limit * 0.8:  # 80% от лимита
+                status_text += f"⚠️ Вы использовали {count}/{limit} сообщений!\n"
+            
+            status_text += f"💎 *Премиум включает:*\n"
+            status_text += f"• Unlimited сообщений\n"
+            status_text += f"• Продвинутая память\n"
+            status_text += f"• Голосовые сообщения\n"
+            status_text += f"• Доступ к платным уровням отношений\n\n"
+            status_text += f"Используйте /buy_premium для покупки!"
+        
+        await message.answer(status_text, parse_mode='MarkdownV2')
     else:
-        await message.answer("Не удалось получить статус. Попробуй позже.")
+        await message.answer("Профиль не найден. Пожалуйста, используй /start.")
 
 @router.message(Command("premium"))
 async def command_premium(message: types.Message):
@@ -112,7 +108,7 @@ async def command_premium(message: types.Message):
         "• 12 месяцев: 6990₽ (-41%)\n\n"
         "Используйте /buy_premium для покупки!"
     )
-    await message.answer(premium_info, parse_mode=None)
+    await message.answer(premium_info, parse_mode='MarkdownV2')
 @router.message(Command("test_premium"))
 @handle_api_errors
 async def test_premium_command(message: types.Message, client: httpx.AsyncClient):
@@ -126,7 +122,4 @@ async def test_premium_command(message: types.Message, client: httpx.AsyncClient
         json={"user_id": user_id, "duration_days": 30}
     )
     
-    if response.status_code == 200:
-        await message.answer("🎉 Тестовая премиум-подписка активирована на 30 дней!\n\nТеперь у вас безлимитные сообщения и все преимущества премиум.")
-    else:
-        await message.answer("❌ Ошибка при активации тестовой подписки. Попробуйте позже.")
+    await message.answer("🎉 Тестовая премиум-подписка активирована на 30 дней!\n\nТеперь у вас безлимитные сообщения и все преимущества премиум.")

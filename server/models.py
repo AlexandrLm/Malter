@@ -48,6 +48,7 @@ class UserProfile(Base):
     subscription_expires: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     daily_message_count: Mapped[int] = mapped_column(server_default='0', nullable=False)
     last_message_date: Mapped[date] = mapped_column(Date, nullable=True)
+    last_processed_payment_charge_id: Mapped[str] = mapped_column(String, nullable=True)
 
     def to_dict(self):
         # Используем inspect, чтобы автоматически собирать все поля модели

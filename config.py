@@ -3,7 +3,8 @@ import logging
 from dotenv import load_dotenv
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+logging.basicConfig(level=getattr(logging, LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -56,7 +57,7 @@ MIN_TYPING_DELAY = float(os.getenv('MIN_TYPING_DELAY', 0.5))
 MAX_TYPING_DELAY = float(os.getenv('MAX_TYPING_DELAY', 4.0))
 
 # --- Redis Configuration ---
-REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 REDIS_DB = int(os.getenv('REDIS_DB', 0))
 

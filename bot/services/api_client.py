@@ -1,5 +1,6 @@
 import logging
 import httpx
+import time
 from functools import wraps
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from config import API_BASE_URL
@@ -13,28 +14,23 @@ def handle_api_errors(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
         message = None
-        if args and isinstance(args[0], httpx.AsyncClient):
-            # Если первый аргумент - client, то message - второй
-            if len(args) > 1 and hasattr(args[1], 'answer'):
-                message = args[1]
-            client = args[0]
-        else:
-            # Ищем message в kwargs или args
-            for arg in args:
-                if hasattr(arg, 'answer'):
-                    message = arg
-                    break
-            client = kwargs.get('client')
+        # Ищем message в args или kwargs
+        for arg in list(args) + list(kwargs.values()):
+            if hasattr(arg, 'answer'):
+                message = arg
+                break
 
         try:
             return await func(*args, **kwargs)
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.error(f"API connection error in {func.__name__} for user {getattr(message, 'from_user', {}).id if message else 'unknown'} after retries: {e}")
+            user_id = getattr(getattr(message, 'from_user', None), 'id', 'unknown') if message else 'unknown'
+            logger.error(f"API connection error in {func.__name__} for user {user_id} after retries: {e}")
             if message:
                 await message.answer("Ой, у меня что-то с интернетом... Попробуй чуть позже.")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error in {func.__name__} for user {getattr(message, 'from_user', {}).id if message else 'unknown'}: {e}", exc_info=True)
+            user_id = getattr(getattr(message, 'from_user', None), 'id', 'unknown') if message else 'unknown'
+            logger.error(f"Unexpected error in {func.__name__} for user {user_id}: {e}", exc_info=True)
             if message:
                 await message.answer("Произошла непредвиденная ошибка. Попробуйте еще раз позже.")
             raise
@@ -46,10 +42,13 @@ def handle_api_errors(func):
     retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
     reraise=True
 )
-async def make_api_request(client: httpx.AsyncClient, method: str, endpoint: str, **kwargs):
+async def make_api_request(client: httpx.AsyncClient, method: str, endpoint: str, user_id: int = None, **kwargs):
     """Централизованная функция для выполнения запросов к API."""
     url = f"{API_BASE_URL}{endpoint}"
-    logger.info(f"Вызов API: {method.upper()} {url}")
+    start_time = time.perf_counter()
+    logger.info(f"API request start - user_id: {user_id}, method: {method.upper()}, endpoint: {endpoint}")
     response = await client.request(method, url, **kwargs)
     response.raise_for_status()
+    latency = time.perf_counter() - start_time
+    logger.info(f"API request end - user_id: {user_id}, method: {method.upper()}, endpoint: {endpoint}, latency: {latency:.2f}s")
     return response
