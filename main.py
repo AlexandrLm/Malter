@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry
+from datetime import datetime
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
 from server.schemas import ChatRequest, ChatResponse, ProfileData, ProfileUpdate, ChatHistory, ProfileStatus
@@ -212,28 +213,46 @@ async def chat_handler(
         )
         AI_RESPONSE_DURATION.observe(time.time() - ai_start_time)
 
-        voice_message_data = None
-        if response_text.startswith('[VOICE]'):
-            text_to_speak = response_text.replace('[VOICE]', '').strip()
-            
-            # Создаем файловый объект в памяти вместо реального файла
-            voice_file_object = io.BytesIO()
-            
-            # Замеряем время генерации голосового сообщения
-            tts_start_time = time.time()
-            success = await create_telegram_voice_message(text_to_speak, voice_file_object)
-            TTS_GENERATION_DURATION.observe(time.time() - tts_start_time)
+        # Premium TTS guard: Check subscription status for [VOICE] handling
+        await check_subscription_expiry(user_id)
+        profile = await get_profile(user_id)
+        is_premium = (
+            profile and
+            profile.subscription_plan == "premium" and
+            profile.subscription_expires and
+            profile.subscription_expires > datetime.now()
+        )
+        logging.info(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
 
-            if success:
-                voice_file_object.seek(0)  # "Перематываем" в начало, чтобы прочитать данные
-                voice_message_bytes = voice_file_object.read()
-                # Кодируем бинарные данные в base64 для передачи в JSON
-                import base64
-                voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
-                VOICE_MESSAGES_GENERATED.inc()
+        voice_message_data = None
+        has_voice_marker = response_text.startswith('[VOICE]')
+        if has_voice_marker:
+            if not is_premium:
+                # Strip [VOICE] for non-premium and skip TTS
+                response_text = response_text.replace('[VOICE]', '', 1).strip()
+                logging.warning(f"Stripped [VOICE] marker for non-premium user {user_id} to prevent TTS")
             else:
-                # Если генерация не удалась, отправляем текстовый fallback
-                response_text = "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!"
+                # Proceed with TTS for premium
+                text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
+                
+                # Создаем файловый объект в памяти вместо реального файла
+                voice_file_object = io.BytesIO()
+                
+                # Замеряем время генерации голосового сообщения
+                tts_start_time = time.time()
+                success = await create_telegram_voice_message(text_to_speak, voice_file_object)
+                TTS_GENERATION_DURATION.observe(time.time() - tts_start_time)
+
+                if success:
+                    voice_file_object.seek(0)  # "Перематываем" в начало, чтобы прочитать данные
+                    voice_message_bytes = voice_file_object.read()
+                    # Кодируем бинарные данные в base64 для передачи в JSON
+                    import base64
+                    voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
+                    VOICE_MESSAGES_GENERATED.inc()
+                else:
+                    # Если генерация не удалась, отправляем текстовый fallback
+                    response_text = "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!"
 
         CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
         return ChatResponse(response_text=response_text, voice_message=voice_message_data)

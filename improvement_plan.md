@@ -17,7 +17,6 @@
 
 - **Монетизация и подписки**:
   - Расширить планы: Tiered subscriptions (basic/premium/pro) с features (e.g., pro — custom personalities).
-  - Интеграция Stripe/Yandex.Kassa помимо Telegram Payments (handlers/payments.py).
   - Analytics: Track user journeys (e.g., funnel от /start до подписки) с Mixpanel.
 
 - **Производительность**:

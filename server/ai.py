@@ -13,7 +13,8 @@ import io
 from google.genai import types as genai_types
 from google.genai.errors import APIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from prompts import BASE_SYSTEM_PROMPT
+from prompts import BASE_SYSTEM_PROMPT, PREMIUM_SYSTEM_PROMPT
+from server.database import check_subscription_expiry
 from personality_prompts import PERSONALITIES
 from config import CHAT_HISTORY_LIMIT, MODEL_NAME, GEMINI_CLIENT
 from server.relationship_config import RELATIONSHIP_LEVELS_CONFIG
@@ -88,6 +89,16 @@ def generate_user_prompt(profile: UserProfile) -> str:
     rules_str = "\n".join([f"- {rule}" for rule in behavioral_rules])
     topics_str = ", ".join(forbidden_topics)
 
+    voice_style = ""
+    if profile.subscription_plan == "premium" and profile.subscription_expires and profile.subscription_expires > datetime.now():
+        # Dynamic voice style based on relationship level for premium surprise
+        if profile.relationship_level >= 3:  # Intimate levels
+            voice_style = "\nДля близких уровней отношений используй интимный стиль голоса: начинай с 'Say in a whisper:' перед текстом в [VOICE]."
+        elif profile.relationship_level >= 2:  # Friends
+            voice_style = "\nДля дружеских уровней используй энергичный стиль: 'Say excitedly:' в [VOICE]."
+        else:
+            voice_style = "\nДля начальных уровней используй нейтральный стиль: просто текст в [VOICE]."
+
     return (
         f"Имя: {profile.name}.\n"
         f"Гендер: {profile.gender}.\n"
@@ -98,6 +109,7 @@ def generate_user_prompt(profile: UserProfile) -> str:
         f"## Запрещенные темы на этом уровне: {topics_str}\n"
         f"## Стиль для текущего уровня отношений ({relationship_name})\n"
         f"  {relationship_example}"
+        f"{voice_style}"
     )
 
 
@@ -136,9 +148,20 @@ def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary |
     Returns:
         str: Сформированный системный промпт.
     """
-    user_context = generate_user_prompt(profile)
-    system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
+    # Check for active premium subscription
+    is_premium = (
+        profile.subscription_plan == "premium"
+        and profile.subscription_expires
+        and profile.subscription_expires > datetime.now()
+    )
+    logging.info(f"Building prompt for user {profile.user_id}: {'PREMIUM' if is_premium else 'BASE'} (plan: {profile.subscription_plan}, expires: {profile.subscription_expires})")
 
+    user_context = generate_user_prompt(profile)
+    if is_premium:
+        system_instruction = PREMIUM_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
+    else:
+        system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
+ 
     # Добавляем сводку к системному промпту
     if latest_summary:
         summary_context = (
