@@ -1,3 +1,4 @@
+from aiogram import F
 import asyncio
 import logging
 import httpx
@@ -85,7 +86,7 @@ async def command_status(message: types.Message, client: httpx.AsyncClient):
             status_text += f"• Доступ к платным уровням отношений\n\n"
             status_text += f"Используйте /buy_premium для покупки!"
         
-        await message.answer(status_text, parse_mode='MarkdownV2')
+        await message.answer(status_text, parse_mode='Markdown')
     else:
         await message.answer("Профиль не найден. Пожалуйста, используй /start.")
 
@@ -108,7 +109,7 @@ async def command_premium(message: types.Message):
         "• 12 месяцев: 6990₽ (-41%)\n\n"
         "Используйте /buy_premium для покупки!"
     )
-    await message.answer(premium_info, parse_mode='MarkdownV2')
+    await message.answer(premium_info, parse_mode='Markdown')
 @router.message(Command("test_premium"))
 @handle_api_errors
 async def test_premium_command(message: types.Message, client: httpx.AsyncClient):
@@ -123,3 +124,73 @@ async def test_premium_command(message: types.Message, client: httpx.AsyncClient
     )
     
     await message.answer("🎉 Тестовая премиум-подписка активирована на 30 дней!\n\nТеперь у вас безлимитные сообщения и все преимущества премиум.")
+from .keyboards import get_profile_keyboard
+
+
+@router.message(Command("profile"))
+@handle_api_errors
+async def command_profile(message: types.Message, client: httpx.AsyncClient):
+    user_id = message.from_user.id
+    response = await make_api_request(client, "get", f"/profile/{user_id}", user_id=user_id)
+    data = response.json()
+    
+    if data:
+        name = data.get('name', 'Не указано')
+        level = data.get('relationship_level', 1)
+        score = data.get('relationship_score', 0)
+        
+        max_score = level * 100  # Примерная логика: каждый уровень требует 100 очков больше
+        progress = score / max_score if max_score > 0 else 0
+        bar_length = 10
+        filled = int(progress * bar_length)
+        bar = '█' * filled + '░' * (bar_length - filled)
+        
+        profile_text = (
+            f"📋 *Ваш профиль*\n\n"
+            f"👤 Имя: {name}\n"
+            f"📍 Город: {data.get('city', 'Не указан')}\n"
+            f"⏰ Часовой пояс: {data.get('timezone', 'UTC')}\n\n"
+            f"❤️ *Отношения*\n"
+            f"Уровень: {level}\n"
+            f"Очки: {score}\n"
+            f"Прогресс до следующего: {bar} ({score}/{max_score})"
+        )
+        
+        await message.answer(profile_text, parse_mode='Markdown', reply_markup=get_profile_keyboard())
+    else:
+        await message.answer("Профиль не найден. Используйте /start для создания профиля.")
+@router.callback_query(F.data == "back_to_chat")
+async def back_to_chat_callback(callback: types.CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Вернулись в чат! 😊")
+
+
+@router.callback_query(F.data == "show_progress")
+@handle_api_errors
+async def show_progress_callback(callback: types.CallbackQuery, client: httpx.AsyncClient):
+    user_id = callback.from_user.id
+    response = await make_api_request(client, "get", f"/profile/{user_id}", user_id=user_id)
+    data = response.json()
+    
+    if data:
+        level = data.get('relationship_level', 1)
+        score = data.get('relationship_score', 0)
+        max_score = level * 100
+        progress = score / max_score if max_score > 0 else 0
+        bar_length = 20  # Более длинный бар для деталей
+        filled = int(progress * bar_length)
+        bar = '❤️' * filled + '🖤' * (bar_length - filled)
+        
+        progress_text = (
+            f"📊 *Детальный прогресс отношений*\n\n"
+            f"Текущий уровень: {level}\n"
+            f"Накоплено очков: {score}\n"
+            f"До следующего уровня: {max_score - score} очков\n\n"
+            f"Прогресс:\n{bar}\n"
+            f"({int(progress * 100)}%)"
+        )
+        
+        await callback.message.edit_text(progress_text, parse_mode='Markdown')
+        await callback.answer()
+    else:
+        await callback.answer("Профиль не найден.")

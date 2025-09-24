@@ -6,13 +6,10 @@
 Цель: Сделать бота более engaging, добавить монетизацию, оптимизировать AI.
 
 - **UX/UI улучшения**:
-  - Inline keyboards для навигации (handlers/keyboards.py): Добавить /profile с прогресс-барами отношений.
-  - Мультиязычность: i18n с aiogram-i18n (поддержка RU/EN, auto-detect по user lang).
-  - Typing simulator: Улучшить (utils/typing_simulator.py) — добавить паузы по эмоциям (анализ sentiment via Gemini).
+  - Inline keyboards для навигации (handlers/keyboards.py): Добавить /profile с прогресс-барами отношений.(Сделано)
 
 - **AI и память**:
   - Улучшить память: Vector search (e.g., pgvector в Postgres) вместо простого LIKE в long_term_memories.
-  - Персонализация: Fine-tune Gemini на user data (Google Vertex AI), A/B-тесты промптов для retention.
   - Новые фичи: Voice input (STT via Gemini), daily quizzes для relationship building.
 
 - **Монетизация и подписки**:
