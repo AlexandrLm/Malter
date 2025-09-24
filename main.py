@@ -69,6 +69,79 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Helper functions for chat_handler
+
+async def check_message_limits(user_id: int) -> dict:
+    """
+    Checks message limits and returns check result.
+    """
+    limit_check = await check_message_limit(user_id)
+    return limit_check
+
+async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
+    """
+    Handles TTS generation for premium users if [VOICE] marker is present.
+    """
+    await check_subscription_expiry(user_id)
+    profile = await get_profile(user_id)
+    is_premium = (
+        profile and
+        profile.subscription_plan == "premium" and
+        profile.subscription_expires and
+        profile.subscription_expires > datetime.now()
+    )
+    logging.info(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
+
+    voice_message_data = None
+    has_voice_marker = response_text.startswith('[VOICE]')
+    if has_voice_marker:
+        if not is_premium:
+            # Strip [VOICE] for non-premium and skip TTS
+            return response_text.replace('[VOICE]', '', 1).strip(), None
+        else:
+            # Proceed with TTS for premium
+            text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
+            
+            # Создаем файловый объект в памяти вместо реального файла
+            voice_file_object = io.BytesIO()
+            
+            # Замеряем время генерации голосового сообщения
+            tts_start_time = time.time()
+            success = await create_telegram_voice_message(text_to_speak, voice_file_object)
+            TTS_GENERATION_DURATION.observe(time.time() - tts_start_time)
+
+            if success:
+                voice_file_object.seek(0)  # "Перематываем" в начало, чтобы прочитать данные
+                voice_message_bytes = voice_file_object.read()
+                # Кодируем бинарные данные в base64 для передачи в JSON
+                import base64
+                voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
+                VOICE_MESSAGES_GENERATED.inc()
+                return text_to_speak, voice_message_data
+            else:
+                # Если генерация не удалась, отправляем текстовый fallback
+                return "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!", None
+
+    return response_text, None
+
+def assemble_chat_response(response_text: str, voice_data: str | None, image_base64: str | None) -> ChatResponse:
+    """
+    Assembles the final ChatResponse object.
+    """
+    if voice_data is None:
+        # No voice, use original text
+        pass
+    else:
+        # Voice generated, text is already stripped
+        response_text = voice_data[0] if isinstance(voice_data, tuple) else response_text
+        voice_message_data = voice_data[1] if isinstance(voice_data, tuple) else voice_data
+
+    return ChatResponse(
+        response_text=response_text,
+        voice_message=voice_message_data,
+        image_base64=image_base64
+    )
+
 # JWT setup
 security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -191,83 +264,35 @@ async def chat_handler(
     """
     start_time = time.time()
     CHAT_REQUESTS.inc()
-    
-    try:
-        # Проверяем лимиты сообщений перед обработкой
-        limit_check = await check_message_limit(user_id)
-        
-        if not limit_check["allowed"]:
-            # Если лимит превышен, возвращаем сообщение об ограничении
-            return ChatResponse(
-                response_text=limit_check["message"],
-                voice_message=None
-            )
-        
-        # Замеряем время генерации ответа AI
-        ai_start_time = time.time()
-        ai_response = await generate_ai_response(
-            user_id=user_id,
-            user_message=chat.message,
-            timestamp=chat.timestamp,
-            image_data=chat.image_data
+
+    # Check message limits
+    limit_check = await check_message_limits(user_id)
+    if not limit_check["allowed"]:
+        CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
+        return ChatResponse(
+            response_text=limit_check["message"],
+            voice_message=None
         )
-        AI_RESPONSE_DURATION.observe(time.time() - ai_start_time)
 
-        response_text = ai_response['text']
-        image_base64 = ai_response.get('image_base64')
+    # Generate AI response
+    ai_start_time = time.time()
+    ai_response = await generate_ai_response(
+        user_id=user_id,
+        user_message=chat.message,
+        timestamp=chat.timestamp,
+        image_data=chat.image_data
+    )
+    AI_RESPONSE_DURATION.observe(time.time() - ai_start_time)
 
-        # Premium TTS guard: Check subscription status for [VOICE] handling
-        await check_subscription_expiry(user_id)
-        profile = await get_profile(user_id)
-        is_premium = (
-            profile and
-            profile.subscription_plan == "premium" and
-            profile.subscription_expires and
-            profile.subscription_expires > datetime.now()
-        )
-        logging.info(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
+    response_text = ai_response['text']
+    image_base64 = ai_response.get('image_base64')
 
-        voice_message_data = None
-        has_voice_marker = response_text.startswith('[VOICE]')
-        if has_voice_marker:
-            if not is_premium:
-                # Strip [VOICE] for non-premium and skip TTS
-                response_text = response_text.replace('[VOICE]', '', 1).strip()
-                logging.warning(f"Stripped [VOICE] marker for non-premium user {user_id} to prevent TTS")
-            else:
-                # Proceed with TTS for premium
-                text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
-                
-                # Создаем файловый объект в памяти вместо реального файла
-                voice_file_object = io.BytesIO()
-                
-                # Замеряем время генерации голосового сообщения
-                tts_start_time = time.time()
-                success = await create_telegram_voice_message(text_to_speak, voice_file_object)
-                TTS_GENERATION_DURATION.observe(time.time() - tts_start_time)
+    # Handle TTS if premium
+    voice_message_data = await handle_tts_generation(user_id, response_text)
 
-                if success:
-                    voice_file_object.seek(0)  # "Перематываем" в начало, чтобы прочитать данные
-                    voice_message_bytes = voice_file_object.read()
-                    # Кодируем бинарные данные в base64 для передачи в JSON
-                    import base64
-                    voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
-                    VOICE_MESSAGES_GENERATED.inc()
-                else:
-                    # Если генерация не удалась, отправляем текстовый fallback
-                    response_text = "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!"
+    CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
+    return assemble_chat_response(response_text, voice_message_data, image_base64)
 
-        CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
-        return ChatResponse(response_text=response_text, voice_message=voice_message_data, image_base64=image_base64)
-
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в chat_handler для пользователя {user_id}: {e}")
-        CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except Exception as e:
-        logging.error(f"Ошибка в chat_handler для пользователя {user_id}: {e}")
-        CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 
 @app.get("/profile/{user_id}", response_model=ProfileData | None, summary="Получение профиля пользователя", description="Возвращает данные профиля пользователя по его ID.")
 async def get_profile_handler(user_id: int):
@@ -280,17 +305,10 @@ async def get_profile_handler(user_id: int):
     Returns:
         ProfileData | None: Данные профиля пользователя или None, если профиль не найден.
     """
-    try:
-        profile = await get_profile(user_id)
-        if not profile:
-            return None
-        return ProfileData(**profile.to_dict())
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в get_profile_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except Exception as e:
-        logging.error(f"Ошибка в get_profile_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+    profile = await get_profile(user_id)
+    if not profile:
+        return None
+    return ProfileData(**profile.to_dict())
 
 @app.get("/chat_history/{user_id}", response_model=ChatHistory | None, summary="Получение истории чата", description="Возвращает историю чата пользователя по его ID.")
 async def get_chat_history_handler(user_id: int):
@@ -303,17 +321,10 @@ async def get_chat_history_handler(user_id: int):
     Returns:
         ChatHistory | None: История чата пользователя или None, если история отсутствует.
     """
-    try:
-        chat_history = await get_unsummarized_messages(user_id)
-        if not chat_history:
-            return None
-        return ChatHistory(user_id=user_id, history=chat_history)
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в get_chat_history_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except Exception as e:
-        logging.error(f"Ошибка в get_chat_history_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+    chat_history = await get_unsummarized_messages(user_id)
+    if not chat_history:
+        return None
+    return ChatHistory(user_id=user_id, history=chat_history)
 
 @app.post("/profile", summary="Создание или обновление профиля", description="Создает новый профиль пользователя или обновляет существующий.")
 async def create_or_update_profile_handler(request: ProfileUpdate):
@@ -326,15 +337,8 @@ async def create_or_update_profile_handler(request: ProfileUpdate):
     Returns:
         dict: JSON с сообщением об успешном обновлении профиля.
     """
-    try:
-        await create_or_update_profile(request.user_id, request.data.dict())
-        return {"message": "Профиль успешно обновлен"}
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в create_or_update_profile_handler для пользователя {request.user_id}: {e}")
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except Exception as e:
-        logging.error(f"Ошибка в create_or_update_profile_handler для пользователя {request.user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+    await create_or_update_profile(request.user_id, request.data.dict())
+    return {"message": "Профиль успешно обновлен"}
 
 @app.delete("/profile/{user_id}", summary="Удаление профиля и истории чата", description="Удаляет профиль пользователя, историю чата, долговременную память и сводку.")
 async def delete_profile_handler(user_id: int):
@@ -347,18 +351,11 @@ async def delete_profile_handler(user_id: int):
     Returns:
         dict: JSON с сообщением об успешном удалении профиля и истории чата.
     """
-    try:
-        await delete_profile(user_id)
-        await delete_chat_history(user_id)
-        await delete_long_term_memory(user_id)
-        await delete_summary(user_id)
-        return {"message": "Профиль и история чата успешно удалены"}
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в delete_profile_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except Exception as e:
-        logging.error(f"Ошибка в delete_profile_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+    await delete_profile(user_id)
+    await delete_chat_history(user_id)
+    await delete_long_term_memory(user_id)
+    await delete_summary(user_id)
+    return {"message": "Профиль и история чата успешно удалены"}
 
 @app.get("/profile/status/{user_id}", response_model=ProfileStatus, summary="Получение статуса профиля", description="Возвращает статус профиля пользователя, включая план подписки и количество сообщений за день.")
 async def get_profile_status_handler(user_id: int):
@@ -374,25 +371,15 @@ async def get_profile_status_handler(user_id: int):
     Вызывает:
         HTTPException: С кодом 404, если профиль не найден.
     """
-    try:
-        profile = await get_profile(user_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail="Профиль не найден")
-        
-        return ProfileStatus(
-            subscription_plan=profile.subscription_plan,
-            subscription_expires=profile.subscription_expires,
-            daily_message_count=profile.daily_message_count
-        )
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в get_profile_status_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except HTTPException:
-        # Повторно выбрасываем HTTPException, если он уже был создан
-        raise
-    except Exception as e:
-        logging.error(f"Ошибка в get_profile_status_handler для пользователя {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+    profile = await get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Профиль не найден")
+    
+    return ProfileStatus(
+        subscription_plan=profile.subscription_plan,
+        subscription_expires=profile.subscription_expires,
+        daily_message_count=profile.daily_message_count
+    )
 
 @app.post("/test-tts", summary="Тест голосовых сообщений")
 async def test_tts(text: str = "Привет! Это тест голосового сообщения."):
@@ -429,26 +416,18 @@ async def activate_premium_handler(activate_request: dict = Body(...)):
     Returns:
         dict: {"success": bool, "message": str}
     """
-    try:
-        user_id = activate_request.get("user_id")
-        duration_days = activate_request.get("duration_days", 30)
-        
-        if not user_id:
-            raise HTTPException(status_code=400, detail="user_id обязателен")
-        
-        success = await activate_premium_subscription(user_id, duration_days)
-        
-        if success:
-            return {"success": True, "message": f"Премиум подписка активирована на {duration_days} дней"}
-        else:
-            raise HTTPException(status_code=500, detail="Ошибка активации подписки")
-            
-    except ValueError as e:
-        logging.error(f"Ошибка валидации данных в activate_premium_handler: {e}")
-        raise HTTPException(status_code=400, detail="Неверные данные запроса")
-    except Exception as e:
-        logging.error(f"Ошибка в activate_premium_handler: {e}")
-        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+    user_id = activate_request.get("user_id")
+    duration_days = activate_request.get("duration_days", 30)
+    
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id обязателен")
+    
+    success = await activate_premium_subscription(user_id, duration_days)
+    
+    if success:
+        return {"success": True, "message": f"Премиум подписка активирована на {duration_days} дней"}
+    else:
+        raise HTTPException(status_code=500, detail="Ошибка активации подписки")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

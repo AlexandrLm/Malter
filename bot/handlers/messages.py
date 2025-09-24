@@ -19,42 +19,31 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
     user_id = message.from_user.id
     image_data_b64 = None
 
-    try:
-        await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-        # Обработка изображения, если оно есть
-        image_data_b64 = await process_image(message)
+    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+    # Обработка изображения, если оно есть
+    image_data_b64 = await process_image(message)
 
-        # Текст сообщения (или подпись к фото)
-        text = message.text or message.caption or ""
+    # Текст сообщения (или подпись к фото)
+    text = message.text or message.caption or ""
 
-        # Get JWT token for the user
-        token = await get_token(client, user_id)
-        
-        payload = {
-            "message": text,
-            "timestamp": message.date.isoformat(),
-            "image_data": image_data_b64  # Добавляем base64 картинки
-        }
+    # Get JWT token for the user
+    token = await get_token(client, user_id)
+    
+    payload = {
+        "message": text,
+        "timestamp": message.date.isoformat(),
+        "image_data": image_data_b64  # Добавляем base64 картинки
+    }
 
-        response = await make_api_request(
-            client,
-            "post",
-            "/chat",
-            user_id=user_id,
-            token=token,
-            json=payload,
-            timeout=180.0  # Увеличиваем таймаут для обработки изображений
-        )
+    response = await make_api_request(
+        client,
+        "post",
+        "/chat",
+        user_id=user_id,
+        token=token,
+        json=payload,
+        timeout=180.0  # Увеличиваем таймаут для обработки изображений
+    )
 
-        data = response.json()
-        await send_response(message, data)
-
-    except (httpx.RequestError, httpx.HTTPStatusError) as e:
-        logger.error(f"API connection error in handle_message for user {user_id} after retries: {e}")
-        await message.answer("Милый, у меня связь пропала... Не вижу твое сообщение. Напиши, как только интернет появится.")
-    except ValueError as e:
-        logger.error(f"ValueError in handle_message for user {user_id}: {e}")
-        await message.answer("Произошла ошибка обработки данных. Попробуйте еще раз.")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred in handle_message for user {user_id}: {e}", exc_info=True)
-        await message.answer("Ой, что-то пошло не так... Попробуй еще раз.")
+    data = response.json()
+    await send_response(message, data)

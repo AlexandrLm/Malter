@@ -109,55 +109,47 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
     payment = message.successful_payment
     user_id = message.from_user.id
     
-    try:
-        # Извлекаем тип подписки из payload
-        payload_parts = payment.invoice_payload.split("_", 2)
-        subscription_type = payload_parts[1]  # "1_month", "3_months", etc.
-        
-        duration_days = {
-            "1_month": 30,
-            "3_months": 90,
-            "6_months": 180,
-            "12_months": 365
-        }
-        
-        days = duration_days[subscription_type]
-        
-        # Активируем подписку через API
-        response = await make_api_request(
-            client,
-            "post",
-            "/activate_premium",
-            user_id=user_id,
-            json={"user_id": user_id, "duration_days": days, "charge_id": payment.telegram_payment_charge_id}
+    # Извлекаем тип подписки из payload
+    payload_parts = payment.invoice_payload.split("_", 2)
+    subscription_type = payload_parts[1]  # "1_month", "3_months", etc.
+    
+    duration_days = {
+        "1_month": 30,
+        "3_months": 90,
+        "6_months": 180,
+        "12_months": 365
+    }
+    
+    days = duration_days[subscription_type]
+    
+    # Активируем подписку через API
+    response = await make_api_request(
+        client,
+        "post",
+        "/activate_premium",
+        user_id=user_id,
+        json={"user_id": user_id, "duration_days": days, "charge_id": payment.telegram_payment_charge_id}
+    )
+    
+    if response.status_code == 200:
+        success_message = (
+            f"🎉 *Поздравляем!*\n\n"
+            f"✨ Премиум подписка активирована на {days} дней!\n\n"
+            f"💎 Теперь у вас есть:\n"
+            f"• Unlimited сообщения\n"
+            f"• Продвинутая память\n"
+            f"• Голосовые сообщения\n"
+            f"• Доступ к платным уровням отношений\n\n"
+            f"Спасибо за поддержку! ❤️"
         )
         
-        if response.status_code == 200:
-            success_message = (
-                f"🎉 *Поздравляем!*\n\n"
-                f"✨ Премиум подписка активирована на {days} дней!\n\n"
-                f"💎 Теперь у вас есть:\n"
-                f"• Unlimited сообщения\n"
-                f"• Продвинутая память\n"
-                f"• Голосовые сообщения\n"
-                f"• Доступ к платным уровням отношений\n\n"
-                f"Спасибо за поддержку! ❤️"
-            )
-            
-            await message.answer(success_message, parse_mode='MarkdownV2')
-            
-            # Логируем успешную покупку
-            logger.info(f"Успешная покупка премиум подписки пользователем {user_id} на {days} дней")
-            
-        else:
-            await message.answer(
-                "❌ Произошла ошибка при активации подписки. "
-                "Обратитесь в поддержку с номером транзакции: " + payment.telegram_payment_charge_id
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка обработки платежа для пользователя {user_id}: {e}")
+        await message.answer(success_message, parse_mode='MarkdownV2')
+        
+        # Логируем успешную покупку
+        logger.info(f"Успешная покупка премиум подписки пользователем {user_id} на {days} дней")
+        
+    else:
         await message.answer(
-            "❌ Произошла ошибка при обработке платежа. "
+            "❌ Произошла ошибка при активации подписки. "
             "Обратитесь в поддержку с номером транзакции: " + payment.telegram_payment_charge_id
         )

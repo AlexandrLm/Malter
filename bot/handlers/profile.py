@@ -54,14 +54,10 @@ async def process_city(message: types.Message, state: FSMContext, client: httpx.
         await message.answer("Название города кажется слишком коротким. Попробуй еще раз.")
         return
 
-    try:
-        location, timezone = await geolocation_service.get_location_and_timezone(message.text)
-        if not location:
-            await message.answer("Не могу найти такой город... Попробуй, пожалуйста, ввести его еще раз, возможно, с уточнением (например, 'Москва, Россия').")
-            return
-    except Exception as e:
-        logger.error(f"Could not determine timezone for {message.text}: {e}")
-        timezone = "UTC"  # Фоллбэк
+    location, timezone = await geolocation_service.get_location_and_timezone(message.text)
+    if not location:
+        await message.answer("Не могу найти такой город... Попробуй, пожалуйста, ввести его еще раз, возможно, с уточнением (например, 'Москва, Россия').")
+        return
 
     await state.update_data(city=message.text, timezone=timezone)
     user_data = await state.get_data()
@@ -73,22 +69,15 @@ async def process_city(message: types.Message, state: FSMContext, client: httpx.
         "timezone": user_data.get("timezone")
     }
 
-    try:
-        await make_api_request(
-            client,
-            "post",
-            "/profile",
-            user_id=message.from_user.id,
-            json={"user_id": message.from_user.id, "data": profile_data}
-        )
-        await state.clear()
-        await message.answer("Привет!")
-    except (httpx.RequestError, httpx.HTTPStatusError) as e:
-        logger.error(f"API connection error saving profile for user {message.from_user.id} after retries: {e}")
-        await message.answer("Ой, не могу сохранить... что-то с телефоном. Давай попробуем позже, нажми /reset.")
-    except Exception as e:
-        logger.error(f"Unexpected error saving profile for user {message.from_user.id}: {e}", exc_info=True)
-        await message.answer("Произошла непредвиденная ошибка при сохранении профиля. Попробуйте еще раз позже.")
+    await make_api_request(
+        client,
+        "post",
+        "/profile",
+        user_id=message.from_user.id,
+        json={"user_id": message.from_user.id, "data": profile_data}
+    )
+    await state.clear()
+    await message.answer("Привет!")
 
 @router.message(ProfileStates.city)
 async def process_city_invalid(message: types.Message):

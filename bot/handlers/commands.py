@@ -14,7 +14,6 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 @router.message(CommandStart())
-@handle_api_errors
 async def command_start(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
     user_id = message.from_user.id
     response = await make_api_request(client, "get", f"/profile/{user_id}", user_id=user_id)
@@ -27,7 +26,6 @@ async def command_start(message: types.Message, state: FSMContext, client: httpx
         await state.set_state(ProfileStates.name)
 
 @router.message(Command("reset"))
-@handle_api_errors
 async def command_reset(message: types.Message, state: FSMContext, client: httpx.AsyncClient):
     user_id = message.from_user.id
     await make_api_request(client, "delete", f"/profile/{user_id}", user_id=user_id)
@@ -37,7 +35,6 @@ async def command_reset(message: types.Message, state: FSMContext, client: httpx
     await state.set_state(ProfileStates.name)
 
 @router.message(Command("status"))
-@handle_api_errors
 async def command_status(message: types.Message, client: httpx.AsyncClient):
     user_id = message.from_user.id
     response = await make_api_request(client, "get", f"/profile/status/{user_id}", user_id=user_id)
@@ -66,8 +63,8 @@ async def command_status(message: types.Message, client: httpx.AsyncClient):
                 
                 if days_left <= 7:
                     status_text += f"\n\n⚠️ Подписка скоро истекает! Продлите для продолжения премиум функций."
-                    
-            except Exception as e:
+                
+            except Exception:
                 status_text += f"✨ *Премиум подписка*\n"
                 status_text += f"Действует до: {expires.split('T')[0]}\n"
                 status_text += f"Unlimited сообщений ✅"
@@ -111,7 +108,6 @@ async def command_premium(message: types.Message):
     )
     await message.answer(premium_info, parse_mode='Markdown')
 @router.message(Command("test_premium"))
-@handle_api_errors
 async def test_premium_command(message: types.Message, client: httpx.AsyncClient):
     """Тестовая активация премиум-подписки на 30 дней для текущего пользователя"""
     user_id = message.from_user.id
@@ -128,7 +124,6 @@ from .keyboards import get_profile_keyboard
 
 
 @router.message(Command("profile"))
-@handle_api_errors
 async def command_profile(message: types.Message, client: httpx.AsyncClient):
     user_id = message.from_user.id
     response = await make_api_request(client, "get", f"/profile/{user_id}", user_id=user_id)
@@ -166,7 +161,6 @@ async def back_to_chat_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "show_progress")
-@handle_api_errors
 async def show_progress_callback(callback: types.CallbackQuery, client: httpx.AsyncClient):
     user_id = callback.from_user.id
     response = await make_api_request(client, "get", f"/profile/{user_id}", user_id=user_id)

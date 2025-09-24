@@ -37,7 +37,32 @@ async def main():
             data["client"] = self.client
             return await handler(event, data)
 
+    class ErrorMiddleware(BaseMiddleware):
+        """
+        Middleware to handle exceptions in handlers globally.
+        Logs errors and sends user-friendly responses.
+        """
+        async def __call__(
+            self,
+            handler,
+            event: types.TelegramObject,
+            data: dict,
+        ) -> types.TelegramObject:
+            try:
+                return await handler(event, data)
+            except Exception as e:
+                logging.error(f"Error in handler for {event.from_user.id if hasattr(event, 'from_user') else 'unknown'}: {e}", exc_info=True)
+                
+                if hasattr(event, 'answer'):
+                    if isinstance(e, (httpx.RequestError, httpx.HTTPStatusError)):
+                        await event.answer("Произошла ошибка связи с сервером. Попробуйте позже.")
+                    else:
+                        await event.answer("Произошла неожиданная ошибка. Попробуйте еще раз.")
+                
+                raise  # Re-raise to prevent silent failures
+
     dp.update.middleware(HttpClientMiddleware(client))
+    dp.update.middleware(ErrorMiddleware())
 
     dp.include_router(router)
 
