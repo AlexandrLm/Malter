@@ -2,6 +2,7 @@ import logging
 import httpx
 from aiogram import Router, F, types
 from aiogram.enums import ChatAction
+from aiogram.utils.chat_action import ChatActionSender
 from aiogram.fsm.context import FSMContext
 from ..services.image_processor import process_image
 from ..services.api_client import make_api_request, get_token
@@ -19,31 +20,31 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
     user_id = message.from_user.id
     image_data_b64 = None
 
-    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-    # Обработка изображения, если оно есть
-    image_data_b64 = await process_image(message)
+    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+        # Обработка изображения, если оно есть
+        image_data_b64 = await process_image(message)
 
-    # Текст сообщения (или подпись к фото)
-    text = message.text or message.caption or ""
+        # Текст сообщения (или подпись к фото)
+        text = message.text or message.caption or ""
 
-    # Get JWT token for the user
-    token = await get_token(client, user_id)
-    
-    payload = {
-        "message": text,
-        "timestamp": message.date.isoformat(),
-        "image_data": image_data_b64  # Добавляем base64 картинки
-    }
+        # Get JWT token for the user
+        token = await get_token(client, user_id)
+        
+        payload = {
+            "message": text,
+            "timestamp": message.date.isoformat(),
+            "image_data": image_data_b64  # Добавляем base64 картинки
+        }
 
-    response = await make_api_request(
-        client,
-        "post",
-        "/chat",
-        user_id=user_id,
-        token=token,
-        json=payload,
-        timeout=180.0  # Увеличиваем таймаут для обработки изображений
-    )
+        response = await make_api_request(
+            client,
+            "post",
+            "/chat",
+            user_id=user_id,
+            token=token,
+            json=payload,
+            timeout=180.0  # Увеличиваем таймаут для обработки изображений
+        )
 
-    data = response.json()
+        data = response.json()
     await send_response(message, data)

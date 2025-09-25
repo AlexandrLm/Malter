@@ -1,6 +1,7 @@
 import asyncio
 from aiogram.types import Message
 from aiogram.enums import ChatAction
+from aiogram.utils.chat_action import ChatActionSender
 from config import TYPING_SPEED_CPS, MIN_TYPING_DELAY, MAX_TYPING_DELAY
 
 
@@ -15,9 +16,9 @@ async def simulate_typing_and_send(message: Message, text: str):
     clamped_delay = max(MIN_TYPING_DELAY, min(delay, MAX_TYPING_DELAY))
 
     # 3. Отправляем экшен "печатает", ждем и отправляем сообщение
-    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-    await asyncio.sleep(clamped_delay)
-    await message.answer(text)
+    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+        await asyncio.sleep(clamped_delay)
+        await message.answer(text)
 
 
 async def send_typing_response(message: Message, text: str):

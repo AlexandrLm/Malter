@@ -1,63 +1,29 @@
-# План по улучшению проекта EvolveAI: Вывод на новый уровень
+# План улучшений для проекта EvolveAI
 
-Короткосрочная фаза завершена (безопасность, тесты, рефакторинг, мониторинг реализованы).
+Этот документ содержит несколько идей и предложений по дальнейшему улучшению кода проекта. Текущая реализация находится на очень высоком уровне, и эти предложения направлены на внедрение дополнительных лучших практик, которые могут быть полезны при дальнейшем развитии и поддержке проекта.
 
-## 2. Среднесрочная фаза: Улучшение UX и фич
-Цель: Сделать бота более engaging, добавить монетизацию, оптимизировать AI.
+---
 
-- **UX/UI улучшения**:
-  - Inline keyboards для навигации (handlers/keyboards.py): Добавить /profile с прогресс-барами отношений.(Сделано)
+### 1. Бэкенд (FastAPI)
 
-- **AI и память**:
-  - Улучшить память: Vector search (e.g., pgvector в Postgres) вместо простого LIKE в long_term_memories.
-  - Новые фичи: Voice input (STT via Gemini), daily quizzes для relationship building.
+#### 1.1. Внедрение структурированного логирования
 
-- **Монетизация и подписки**:
-  - Расширить планы: Tiered subscriptions (basic/premium/pro) с features (e.g., pro — custom personalities).
-  - Analytics: Track user journeys (e.g., funnel от /start до подписки) с Mixpanel.
+*   **Предложение:** Перейти со стандартного `logging` на структурированное логирование с помощью библиотеки `structlog`.
+*   **Обоснование:** Структурированные логи (обычно в формате JSON) гораздо проще парсить, фильтровать и анализировать в системах сбора логов, таких как ELK Stack (Elasticsearch, Logstash, Kibana) или Grafana Loki. Это значительно упрощает отладку и мониторинг в продакшен-окружении, позволяя, например, легко отслеживать полный путь запроса по `user_id` или `trace_id`.
 
-- **Производительность**:
-  - Background tasks: Celery + Redis для summarizer.py/TTS (убрать asyncio.create_task).
-  - Кэширование: Redis для AI responses (TTL 5 мин), CDN для voice files.
+#### 1.2. Управление зависимостями с помощью Poetry
 
-- **Ожидаемый эффект**: Увеличение engagement (средний чат >10 сообщений), revenue от подписок >$1k/мес.
+*   **Предложение:** Заменить файл `requirements.txt` на систему управления зависимостями `Poetry`.
+*   **Обоснование:** `Poetry` создает детерминированный `poetry.lock` файл, который гарантирует, что на всех машинах (локальной, тестовой, продакшен) будут установлены абсолютно одинаковые версии всех пакетов и их под-зависимостей. Это полностью решает проблему "у меня работает, а на сервере нет" и делает сборку проекта более надежной и предсказуемой.
 
-## 3. Долгосрочная фаза: Масштабирование и инновации
-Цель: Преобразовать в полноценный сервис, добавить ML/аналитику.
+---
 
-- **Инфраструктура**:
-  - Деплой: Kubernetes на GCP/AWS, auto-scaling для API/bot.
-  - CI/CD: GitHub Actions (lint, test, deploy on merge).
-  - Backup/DR: Postgres snapshots, Redis persistence.
+### 3. Общее
 
-- **Новые фичи**:
-  - Сообщество: Group chats, user matching по profiles.
-  - AI эволюция: Multi-modal (video analysis), integration с другими LLMs (e.g., Grok via API).
-  - Analytics dashboard: Web-app (Streamlit/FastAPI) для admins (user stats, A/B results).
+#### 3.1. Написание автоматических тестов
 
-- **Compliance и рост**:
-  - GDPR/Privacy: Consent flows, data deletion on request.
-  - Marketing: Referral system (bonus days за invites), SEO для landing page.
-  - A/B-тестирование: Для всех фич (e.g., разные personalities).
-
-- **Ожидаемый эффект**: 10k+ users, multi-platform (web/discord), sustainable business.
-
-## Roadmap (Mermaid диаграмма)
-```mermaid
-gantt
-    title EvolveAI Improvement Roadmap
-    dateFormat  YYYY-MM-DD
-    section Short-term (Completed)
-    Security & Tests    :a1, 2025-09-25, 14d
-    Refactor & Monitoring :after a1, 7d
-    section Mid-term
-    UX & AI Features    :m1, after a1, 30d
-    Monetization        :m2, after m1, 30d
-    Performance         :m3, after m2, 14d
-    section Long-term
-    Infra & Scaling     :l1, after m3, 60d
-    New Features        :l2, after l1, 90d
-    Compliance & Growth :l3, after l2, 30d
-```
-
-Короткосрочная фаза завершена, переходим к среднесрочной.
+*   **Предложение:** Добавить автоматические тесты для ключевых частей бизнес-логики с помощью `pytest` и `httpx.AsyncClient` для тестирования API.
+*   **Обоснование:** Проект достиг уровня сложности, когда ручное тестирование становится неэффективным и трудоемким. Автоматические тесты (юнит-тесты для отдельных функций и интеграционные тесты для API эндпоинтов) позволят:
+    *   Гарантировать, что новые изменения не сломали существующую функциональность (регрессионное тестирование).
+    *   Упростить рефакторинг, так как тесты служат "сетью безопасности".
+    *   Проверять корректность работы ключевой логики, такой как обновление `relationship_score`, работа FSM или логика подписок.
