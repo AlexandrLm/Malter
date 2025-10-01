@@ -444,6 +444,23 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         response: Ответ от API Gemini.
     """
     logging.info(f"Попытка вызова Gemini API для пользователя {user_id}")
+    
+    # Log system instruction and context for debugging
+    system_log = system_instruction[:500] + "..." if len(system_instruction) > 500 else system_instruction
+    logging.info(f"Системная инструкция для пользователя {user_id}: {system_log}")
+    
+    context_parts = []
+    for content in contents:
+        role = content.role
+        text_parts = [part.text for part in content.parts if hasattr(part, 'text') and part.text]
+        if text_parts:
+            text = " ".join(text_parts)[:200] + "..." if len(" ".join(text_parts)) > 200 else " ".join(text_parts)
+            context_parts.append(f"{role}: {text}")
+        else:
+            context_parts.append(f"{role}: [no text, possibly image]")
+    context_str = "\n".join(context_parts)
+    logging.info(f"Контекст, переданный в модель для пользователя {user_id}:\n{context_str}")
+    
     try:
         response = await client.aio.models.generate_content(
             model=model_name,
@@ -456,6 +473,11 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
                 )
             )
         )
+        
+        # Log token usage for debugging
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            logging.info(f"Потребление токенов для пользователя {user_id}: prompt={response.usage_metadata.prompt_token_count}, candidates={response.usage_metadata.candidates_token_count}")
+        
         return response
     except APIError as e:
         logging.warning(f"Ошибка Gemini API для пользователя {user_id}: {e}. Повторная попытка...")
