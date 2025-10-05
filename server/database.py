@@ -270,11 +270,11 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
             
             # 2. Если факт уже существует, ничего не делаем и сообщаем об этом
             if existing_fact:
-                logging.info(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
+                logging.debug(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
                 return {"status": "skipped", "reason": "duplicate fact"}
 
             # 3. Если факта нет, сохраняем его
-            logging.info(f"Сохранение нового факта для user_id {user_id}")
+            logging.debug(f"Сохранение нового факта для user_id {user_id}")
             memory = LongTermMemory(
                 user_id=user_id,
                 fact=fact,
@@ -289,7 +289,7 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
 
 async def get_long_term_memories(user_id: int, query: str) -> dict:
     """Выполняет поиск по ключевым словам в долгосрочной памяти."""
-    logging.info(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
+    logging.debug(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
     try:
         async with async_session_factory() as session:
             # Используем ilike для регистронезависимого поиска
@@ -608,7 +608,7 @@ async def check_subscription_expiry(user_id: int) -> bool:
             "subscription_plan": "free",
             "subscription_expires": None
         })
-        logging.info(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
+        logging.debug(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
         return False
     
     return profile.subscription_plan == 'premium'
@@ -634,7 +634,7 @@ async def activate_premium_subscription(user_id: int, duration_days: int = 30, c
 
         # Проверяем идемпотентность
         if charge_id and profile.last_processed_payment_charge_id == charge_id:
-            logging.info(f"Платеж {charge_id} для пользователя {user_id} уже обработан")
+            logging.debug(f"Платеж {charge_id} для пользователя {user_id} уже обработан")
             return True
 
         expires_at = datetime.now(timezone.utc) + timedelta(days=duration_days)

@@ -17,13 +17,13 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
         return False
         
     try:
-        logging.info(f"Генерация аудио для текста: '{text_to_speak}'...")
+        logging.debug(f"Генерация аудио для текста: '{text_to_speak}'...")
         
         response = await call_tts_api_with_retry(text_to_speak)
         
         # Log usage metadata for monitoring
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            logging.info(f"Gemini TTS usage: {response.usage_metadata}")
+            logging.debug(f"Gemini TTS usage: {response.usage_metadata}")
         
         # Получаем аудиоданные напрямую из ответа
         if not response.candidates or not response.candidates[0].content.parts:
@@ -31,7 +31,7 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
             return False
         
         pcm_data = response.candidates[0].content.parts[0].inline_data.data
-        logging.info("Аудиоданные (PCM) получены.")
+        logging.debug("Аудиоданные (PCM) получены.")
         
         # Если получили WAV, конвертируем через pydub
         if isinstance(pcm_data, bytes) and pcm_data.startswith(b'RIFF'):
@@ -47,13 +47,13 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
                 channels=1           # Моно
             )
 
-        logging.info("Конвертация в OGG/OPUS...")
+        logging.debug("Конвертация в OGG/OPUS...")
         # Оборачиваем блокирующий вызов экспорта в to_thread, так как он работает с файловым объектом
         await asyncio.to_thread(
             audio_segment.export, out_f=output_file_object, format="ogg", codec="libopus"
         )
 
-        logging.info(f"Аудио успешно сконвертировано. Размер PCM данных: {len(pcm_data)} байт")
+        logging.debug(f"Аудио успешно сконвертировано. Размер PCM данных: {len(pcm_data)} байт")
         return True
 
     except APIError as e:
@@ -73,7 +73,7 @@ async def call_tts_api_with_retry(text_to_speak: str):
     """
     Выполняет асинхронный вызов к TTS API Gemini с логикой повторных попыток.
     """
-    logging.info("Попытка вызова TTS API...")
+    logging.debug("Попытка вызова TTS API...")
     try:
         # Используем актуальную структуру API согласно документации
         response = await TTS_CLIENT.aio.models.generate_content(

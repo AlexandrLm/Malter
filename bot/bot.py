@@ -84,7 +84,7 @@ async def main():
     # Регистрируем обработчики сигналов для graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-    logging.info("Обработчики сигналов SIGTERM и SIGINT зарегистрированы")
+    logging.debug("Обработчики сигналов SIGTERM и SIGINT зарегистрированы")
 
     # Используем async context manager для httpx клиента
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -92,7 +92,7 @@ async def main():
         dp.update.middleware(HttpClientMiddleware(client))
         
         try:
-            logging.info("Запуск polling...")
+            logging.debug("Запуск polling...")
             
             # Создаём задачу polling
             polling_task = asyncio.create_task(dp.start_polling(bot))
@@ -116,7 +116,7 @@ async def main():
                 # Даём время на завершение обработки текущих сообщений (макс 10 сек)
                 try:
                     await asyncio.wait_for(polling_task, timeout=10.0)
-                    logging.info("Все текущие сообщения обработаны")
+                    logging.debug("Все текущие сообщения обработаны")
                 except asyncio.TimeoutError:
                     logging.warning("Таймаут ожидания завершения обработки сообщений (10s)")
                     polling_task.cancel()
@@ -129,12 +129,12 @@ async def main():
             logging.error(f"Критическая ошибка в main loop: {e}", exc_info=True)
         finally:
             # Cleanup resources
-            logging.info("Начинаем cleanup ресурсов...")
+            logging.debug("Начинаем cleanup ресурсов...")
             
             # Закрываем сессию бота
             try:
                 await bot.session.close()
-                logging.info("Bot session закрыта")
+                logging.debug("Bot session закрыта")
             except Exception as e:
                 logging.error(f"Ошибка при закрытии bot session: {e}")
             
@@ -142,7 +142,7 @@ async def main():
             if storage:
                 try:
                     await storage.close()
-                    logging.info("Redis storage закрыт")
+                    logging.debug("Redis storage закрыт")
                 except Exception as e:
                     logging.error(f"Ошибка при закрытии storage: {e}")
             

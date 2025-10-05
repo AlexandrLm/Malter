@@ -43,6 +43,196 @@ from datetime import datetime
 # Глобальная переменная для клиента
 client = GEMINI_CLIENT
 
+
+class AIResponseGenerator:
+    """
+    Класс для генерации AI ответов с улучшенной организацией кода.
+    Инкапсулирует логику генерации ответов и управления состоянием.
+    """
+    
+    def __init__(self, user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None):
+        """
+        Инициализация генератора ответов.
+        
+        Args:
+            user_id: ID пользователя
+            user_message: Сообщение пользователя
+            timestamp: Временная метка
+            image_data: Опциональные данные изображения в base64
+        """
+        self.user_id = user_id
+        self.user_message = user_message
+        self.timestamp = timestamp
+        self.image_data = image_data
+        
+        # Состояние генератора
+        self.profile: UserProfile | None = None
+        self.latest_summary: ChatSummary | None = None
+        self.unsummarized_messages: list[ChatHistory] = []
+        self.formatted_message: str = ""
+        self.system_instruction: str = ""
+        self.history: list[genai_types.Content] = []
+        self.tools: genai_types.Tool | None = None
+        self.available_functions: dict = {}
+        
+    async def _load_user_context(self) -> bool:
+        """
+        Загружает контекст пользователя из БД.
+        
+        Returns:
+            True если профиль найден, False иначе
+        """
+        from server.database import get_user_context_data
+        self.profile, self.latest_summary, self.unsummarized_messages = await get_user_context_data(self.user_id)
+        return self.profile is not None
+    
+    async def _prepare_request_data(self) -> None:
+        """Подготавливает данные для запроса к AI."""
+        self.formatted_message = format_user_message(self.user_message, self.profile, self.timestamp)
+        self.system_instruction = build_system_instruction(self.profile, self.latest_summary)
+        await save_chat_message(self.user_id, 'user', self.formatted_message)
+        
+        image_part = await process_image_data(self.image_data, self.user_id)
+        self.history = await prepare_chat_history(
+            self.unsummarized_messages, 
+            self.formatted_message, 
+            image_part
+        )
+        
+        self.tools = genai_types.Tool(
+            function_declarations=[add_memory_function, get_memories_function, generate_image_function]
+        )
+        
+        self.available_functions = {
+            "save_long_term_memory": partial(save_long_term_memory, self.user_id),
+            "get_long_term_memories": partial(get_long_term_memories, self.user_id),
+            "generate_image": generate_image,
+        }
+    
+    async def _process_iteration(self, iteration: int) -> tuple[bool, str | None, str | None]:
+        """
+        Обрабатывает одну итерацию генерации ответа.
+        
+        Args:
+            iteration: Номер текущей итерации
+            
+        Returns:
+            Tuple[should_continue, final_response, image_b64]
+            - should_continue: True если нужна ещё одна итерация
+            - final_response: Финальный ответ если готов
+            - image_b64: base64 изображения если сгенерировано
+        """
+        response = await call_gemini_api_with_retry(
+            user_id=self.user_id,
+            model_name=MODEL_NAME,
+            contents=self.history,
+            tools=[self.tools],
+            system_instruction=self.system_instruction,
+            thinking_budget=AI_THINKING_BUDGET
+        )
+        
+        # Проверка наличия кандидатов
+        if not response.candidates:
+            logging.warning(f"Ответ от API для пользователя {self.user_id} не содержит кандидатов.")
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                logging.error(
+                    f"Запрос для {self.user_id} заблокирован: "
+                    f"{response.prompt_feedback.block_reason_message}"
+                )
+                return False, "Я не могу ответить на это. Запрос был заблокирован.", None
+            return False, "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности.", None
+        
+        candidate = response.candidates[0]
+        
+        # Обработка вызовов функций
+        tool_image = await manage_function_calls(
+            response, 
+            self.history, 
+            self.available_functions, 
+            self.user_id
+        )
+        if tool_image:
+            return True, None, tool_image  # Продолжаем с изображением
+        
+        # Получаем финальный ответ
+        final_response = await handle_final_response(response, self.user_id, candidate)
+        
+        # Логирование usage metadata
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            logging.debug(f"Gemini usage for user {self.user_id}: {response.usage_metadata}")
+        
+        return False, final_response, None  # Готово
+    
+    async def _save_response_and_trigger_analysis(self, final_response: str) -> None:
+        """
+        Сохраняет ответ и запускает фоновый анализ.
+        
+        Args:
+            final_response: Финальный ответ для сохранения
+        """
+        logging.debug(f"Сгенерирован финальный ответ для пользователя {self.user_id}: '{final_response}'")
+        await save_chat_message(self.user_id, 'model', final_response)
+        
+        # Запускаем фоновую задачу анализа с обработкой ошибок
+        from server.summarizer import generate_summary_and_analyze
+        task = asyncio.create_task(generate_summary_and_analyze(self.user_id))
+        task.add_done_callback(lambda t: _handle_background_task_error(t, self.user_id))
+    
+    async def generate(self) -> dict[str, str | None]:
+        """
+        Главный метод генерации ответа.
+        
+        Returns:
+            Dict с ключами 'text' и 'image_base64'
+        """
+        # Валидация клиента
+        if client is None:
+            logging.error("Клиент Gemini не инициализирован.")
+            return {
+                "text": "Произошла критическая ошибка конфигурации. Попробуйте еще раз позже.",
+                "image_base64": None
+            }
+        
+        try:
+            # Загрузка контекста
+            if not await self._load_user_context():
+                logging.error(f"Профиль пользователя {self.user_id} не найден!")
+                return {
+                    "text": "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение.",
+                    "image_base64": None
+                }
+            
+            # Подготовка данных
+            await self._prepare_request_data()
+            
+            # Итеративная генерация ответа
+            image_b64 = None
+            for iteration in range(MAX_AI_ITERATIONS):
+                should_continue, final_response, tool_image = await self._process_iteration(iteration + 1)
+                
+                if tool_image:
+                    image_b64 = tool_image
+                    continue
+                
+                if final_response:
+                    await self._save_response_and_trigger_analysis(final_response)
+                    return {"text": final_response, "image_base64": image_b64}
+            
+            # Достигнут лимит итераций
+            logging.warning(f"Достигнут лимит итераций ({MAX_AI_ITERATIONS}) для пользователя {self.user_id}.")
+            return {
+                "text": "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое.",
+                "image_base64": None
+            }
+            
+        except Exception as e:
+            logging.error(f"Ошибка при генерации ответа для пользователя {self.user_id}: {e}", exc_info=True)
+            return {
+                "text": "Произошла внутренняя ошибка. Попробуйте еще раз позже.",
+                "image_base64": None
+            }
+
+
 def _handle_background_task_error(task: asyncio.Task, user_id: int) -> None:
     """
     Обработчик ошибок для фоновых задач.
@@ -194,7 +384,7 @@ def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary |
     """
     # Используем новый property для проверки premium
     is_premium = profile.is_premium_active
-    logging.info(f"Building prompt for user {profile.user_id}: {'PREMIUM' if is_premium else 'BASE'} (plan: {profile.subscription_plan}, expires: {profile.subscription_expires})")
+    logging.debug(f"Building prompt for user {profile.user_id}: {'PREMIUM' if is_premium else 'BASE'} (plan: {profile.subscription_plan}, expires: {profile.subscription_expires})")
 
     user_context = generate_user_prompt(profile)
     if is_premium:
@@ -255,7 +445,7 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
             logging.warning(f"Изображение слишком большое ({image_size} байт, максимум {MAX_IMAGE_SIZE} байт) для пользователя {user_id}")
             return None
         
-        logging.info(f"Обработка изображения размером {image_size} байт для пользователя {user_id}")
+        logging.debug(f"Обработка изображения размером {image_size} байт для пользователя {user_id}")
         return genai_types.Part.from_bytes(
             data=image_bytes,
             mime_type='image/jpeg'
@@ -305,7 +495,7 @@ async def manage_function_calls(response, history: list[genai_types.Content], av
     
     function_call = response.function_calls[0]
     function_name = function_call.name
-    logging.info(f"Модель вызвала функцию: {function_name}")
+    logging.debug(f"Модель вызвала функцию: {function_name}")
 
     if function_name not in available_functions:
         logging.warning(f"Модель попыталась вызвать неизвестную функцию '{function_name}'")
@@ -314,10 +504,10 @@ async def manage_function_calls(response, history: list[genai_types.Content], av
 
     function_to_call = available_functions[function_name]
     function_args = dict(function_call.args)
-    logging.info(f"Аргументы функции: {function_args}")
+    logging.debug(f"Аргументы функции: {function_args}")
 
     function_response_data = await function_to_call(**function_args)
-    logging.info(f"Результат функции '{function_name}': {function_response_data if function_name != 'generate_image' else 'Image generated'}")
+    logging.debug(f"Результат функции '{function_name}': {function_response_data if function_name != 'generate_image' else 'Image generated'}")
 
     history.append(response.candidates[0].content)
     history.append(genai_types.Content(
@@ -363,96 +553,26 @@ async def handle_final_response(response, user_id: int, candidate) -> str:
     return final_response
 
 
-async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> str:
+async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> dict[str, str | None]:
     """
     Генерирует ответ AI с использованием `generate_content`, сохраняя и извлекая историю чата из БД.
     Поддерживает обработку изображений.
+    
+    Использует класс AIResponseGenerator для лучшей организации кода.
+    
+    Args:
+        user_id: ID пользователя
+        user_message: Сообщение пользователя
+        timestamp: Временная метка сообщения
+        image_data: Опциональные данные изображения в base64
+        
+    Returns:
+        Dict с ключами 'text' и 'image_base64'
     """
     logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
-    if client is None:
-        logging.error("Клиент Gemini не инициализирован.")
-        return "Произошла критическая ошибка конфигурации. Попробуйте еще раз позже."
-
-    try:
-        # --- Оптимизированное получение данных одним запросом к БД ---
-        # Решает N+1 Query Problem: вместо 3-4 запросов делаем 1
-        from server.database import get_user_context_data
-        profile, latest_summary, unsummarized_messages = await get_user_context_data(user_id)
-        # -------------------------------------------------------------
-
-        if not profile:
-            logging.error(f"Профиль пользователя {user_id} не найден!")
-            return {"text": "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение.", "image_base64": None}
     
-        formatted_message = format_user_message(user_message, profile, timestamp)
-        system_instruction = build_system_instruction(profile, latest_summary)
-        await save_chat_message(user_id, 'user', formatted_message)
-        
-        image_part = await process_image_data(image_data, user_id)
-        history = await prepare_chat_history(unsummarized_messages, formatted_message, image_part)
-    
-        tools = genai_types.Tool(function_declarations=[add_memory_function, get_memories_function, generate_image_function])
-        
-        available_functions = {
-            "save_long_term_memory": partial(save_long_term_memory, user_id),
-            "get_long_term_memories": partial(get_long_term_memories, user_id),
-            "generate_image": generate_image,
-        }
-    
-        iteration_count = 0
-        image_b64 = None
-        while iteration_count < MAX_AI_ITERATIONS:
-            iteration_count += 1
-            contents = history
-    
-            response = await call_gemini_api_with_retry(
-                user_id=user_id,
-                model_name=MODEL_NAME,
-                contents=contents,
-                tools=[tools],
-                system_instruction=system_instruction,
-                thinking_budget=AI_THINKING_BUDGET
-            )
-    
-            if not response.candidates:
-                logging.warning(f"Ответ от API для пользователя {user_id} не содержит кандидатов.")
-                if response.prompt_feedback and response.prompt_feedback.block_reason:
-                    logging.error(f"Запрос для {user_id} заблокирован: {response.prompt_feedback.block_reason_message}")
-                    return {"text": "Я не могу ответить на это. Запрос был заблокирован.", "image_base64": None}
-                return {"text": "Я не могу ответить на это. Возможно, твой запрос нарушает политику безопасности.", "image_base64": None}
-    
-            candidate = response.candidates[0]
-    
-            tool_image = await manage_function_calls(response, history, available_functions, user_id)
-            if tool_image:
-                image_b64 = tool_image
-                continue
-            
-            final_response = await handle_final_response(response, user_id, candidate)
-    
-            # --- Единая точка сохранения и запуска анализа ---
-            logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
-            await save_chat_message(user_id, 'model', final_response)
-            
-            # Запускаем фоновую задачу анализа с обработкой ошибок
-            from server.summarizer import generate_summary_and_analyze
-            task = asyncio.create_task(generate_summary_and_analyze(user_id))
-            # Добавляем callback для логирования ошибок
-            task.add_done_callback(lambda t: _handle_background_task_error(t, user_id))
-            # --------------------------------------------------
-    
-            # Log usage metadata for monitoring
-            if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                logging.info(f"Gemini usage for user {user_id}: {response.usage_metadata}")
-    
-            return {"text": final_response, "image_base64": image_b64}
-    
-        logging.warning(f"Достигнут лимит итераций ({MAX_AI_ITERATIONS}) для пользователя {user_id}.")
-        return {"text": "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое.", "image_base64": None}
-    
-    except Exception as e:
-        logging.error(f"Ошибка при генерации ответа для пользователя {user_id}: {e}", exc_info=True)
-        return {"text": "Произошла внутренняя ошибка. Попробуйте еще раз позже.", "image_base64": None}
+    generator = AIResponseGenerator(user_id, user_message, timestamp, image_data)
+    return await generator.generate()
 
 @retry(
     stop=stop_after_attempt(3),
@@ -475,11 +595,11 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
     Returns:
         response: Ответ от API Gemini.
     """
-    logging.info(f"Попытка вызова Gemini API для пользователя {user_id}")
+    logging.debug(f"Попытка вызова Gemini API для пользователя {user_id}")
     
     # Log system instruction and context for debugging
     system_log = system_instruction[:500] + "..." if len(system_instruction) > 500 else system_instruction
-    logging.info(f"Системная инструкция для пользователя {user_id}: {system_log}")
+    logging.debug(f"Системная инструкция для пользователя {user_id}: {system_log}")
     
     context_parts = []
     for content in contents:
@@ -491,7 +611,7 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         else:
             context_parts.append(f"{role}: [no text, possibly image]")
     context_str = "\n".join(context_parts)
-    logging.info(f"Контекст, переданный в модель для пользователя {user_id}:\n{context_str}")
+    logging.debug(f"Контекст, переданный в модель для пользователя {user_id}:\n{context_str}")
     
     try:
         response = await client.aio.models.generate_content(
@@ -508,7 +628,7 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         
         # Log token usage for debugging
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            logging.info(f"Потребление токенов для пользователя {user_id}: prompt={response.usage_metadata.prompt_token_count}, candidates={response.usage_metadata.candidates_token_count}")
+            logging.debug(f"Потребление токенов для пользователя {user_id}: prompt={response.usage_metadata.prompt_token_count}, candidates={response.usage_metadata.candidates_token_count}")
         
         return response
     except APIError as e:
@@ -540,7 +660,7 @@ async def generate_image(prompt: str) -> str:
                 if part.inline_data is not None:
                     image_data = part.inline_data.data
                     image_b64 = base64.b64encode(image_data).decode('utf-8')
-                    logging.info(f"Image generated successfully for prompt: {prompt[:50]}...")
+                    logging.debug(f"Image generated successfully for prompt: {prompt[:50]}...")
                     return image_b64
         
         raise ValueError("Image generation failed: No image data in response")

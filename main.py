@@ -85,7 +85,7 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
     await check_subscription_expiry(user_id)
     profile = await get_profile(user_id)
     is_premium = profile and profile.is_premium_active
-    logging.info(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
+    logging.debug(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
 
     voice_message_data = None
     has_voice_marker = response_text.startswith('[VOICE]')

@@ -106,7 +106,7 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
     all_unsummarized_messages = await get_unsummarized_messages(user_id)
 
     if len(all_unsummarized_messages) < SUMMARY_THRESHOLD:
-        logging.info(f"Недостаточно сообщений для анализа у user_id {user_id}.")
+        logging.debug(f"Недостаточно сообщений для анализа у user_id {user_id}.")
         return None
 
     messages_to_analyze = all_unsummarized_messages[:MESSAGES_TO_SUMMARIZE_COUNT]
@@ -123,7 +123,7 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         
         # Log usage metadata for monitoring
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            logging.info(f"Gemini summarizer usage for user {user_id}: {response.usage_metadata}")
+            logging.debug(f"Gemini summarizer usage for user {user_id}: {response.usage_metadata}")
         
         analysis_data = parse_summary_json(response.text, user_id)
         if not analysis_data:
@@ -144,7 +144,7 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
 
         await check_for_level_up(user_id)
 
-        logging.info(f"Анализ для user_id {user_id} завершен. Очки: {quality_score}.")
+        logging.debug(f"Анализ для user_id {user_id} завершен. Очки: {quality_score}.")
         return new_summary
 
     except Exception as e:
@@ -187,7 +187,7 @@ async def _update_profile_and_summary_with_retry(
         # 3. Удаляем обработанные сообщения
         await delete_summarized_messages(user_id, last_message_id)
         
-        logging.info(f"Профиль и сводка успешно обновлены для user_id {user_id}")
+        logging.debug(f"Профиль и сводка успешно обновлены для user_id {user_id}")
     except SQLAlchemyError as e:
         logging.error(f"Ошибка БД при обновлении профиля/сводки для user_id {user_id}: {e}", exc_info=True)
         raise  # Будет повторная попытка через retry
