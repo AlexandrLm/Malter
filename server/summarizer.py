@@ -164,7 +164,7 @@ async def _update_profile_and_summary_with_retry(
     last_message_id: int
 ) -> None:
     """
-    Критичные операции с БД с retry механизмом.
+    Критичные операции с БД с retry механизмом в ОДНОЙ ТРАНЗАКЦИИ.
     Гарантирует атомарность: либо все операции выполнятся, либо ни одна.
     
     Args:
@@ -173,21 +173,47 @@ async def _update_profile_and_summary_with_retry(
         new_summary: Текст сводки
         last_message_id: ID последнего обработанного сообщения
     """
+    from server.database import async_session_factory
+    from sqlalchemy import update, delete
+    from sqlalchemy.dialects.postgresql import insert
+    from server.models import UserProfile, ChatSummary, ChatHistory
+    from datetime import datetime
+    
     try:
-        # 1. Обновляем профиль с новым score
-        profile = await get_profile(user_id)
-        if profile:
-            await create_or_update_profile(user_id, {
-                "relationship_score": profile.relationship_score + quality_score
-            })
+        # ТРАНЗАКЦИЯ: Все операции в одной сессии с автоматическим rollback при ошибке
+        async with async_session_factory() as session:
+            async with session.begin():
+                # 1. Обновляем relationship_score в профиле
+                stmt = (
+                    update(UserProfile)
+                    .where(UserProfile.user_id == user_id)
+                    .values(relationship_score=UserProfile.relationship_score + quality_score)
+                )
+                await session.execute(stmt)
+                
+                # 2. Сохраняем сводку (UPSERT)
+                data = {
+                    "summary": new_summary,
+                    "last_message_id": last_message_id,
+                    "timestamp": datetime.now()
+                }
+                stmt = insert(ChatSummary).values(user_id=user_id, **data)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['user_id'],
+                    set_=data
+                )
+                await session.execute(stmt)
+                
+                # 3. Удаляем обработанные сообщения
+                stmt = delete(ChatHistory).where(
+                    ChatHistory.user_id == user_id,
+                    ChatHistory.id <= last_message_id
+                )
+                await session.execute(stmt)
+                
+                # Если дошли сюда - все ОК, транзакция будет зафиксирована
         
-        # 2. Сохраняем сводку
-        await save_summary(user_id, new_summary, last_message_id)
-        
-        # 3. Удаляем обработанные сообщения
-        await delete_summarized_messages(user_id, last_message_id)
-        
-        logging.debug(f"Профиль и сводка успешно обновлены для user_id {user_id}")
+        logging.debug(f"Профиль и сводка успешно обновлены в транзакции для user_id {user_id}")
     except SQLAlchemyError as e:
         logging.error(f"Ошибка БД при обновлении профиля/сводки для user_id {user_id}: {e}", exc_info=True)
         raise  # Будет повторная попытка через retry

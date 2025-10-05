@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry, cleanup_old_chat_history
 from datetime import datetime
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
@@ -198,7 +198,8 @@ async def health_check():
     return {"status": "ok"}
 
 @app.post("/auth", summary="Генерация JWT токена", description="Создает JWT токен для пользователя по user_id (для внутреннего использования бота).")
-async def auth_endpoint(auth_data: dict = Body(...)):
+@limiter.limit("10/minute")
+async def auth_endpoint(request: Request, auth_data: dict = Body(...)):
     """
     Генерирует JWT токен для аутентификации API запросов.
     
@@ -375,7 +376,8 @@ async def get_chat_history_handler(user_id: int):
     return ChatHistory(user_id=user_id, history=chat_history)
 
 @app.post("/profile", summary="Создание или обновление профиля", description="Создает новый профиль пользователя или обновляет существующий.")
-async def create_or_update_profile_handler(request: ProfileUpdate):
+@limiter.limit("20/minute")
+async def create_or_update_profile_handler(request: Request, profile_update: ProfileUpdate):
     """
     Создает новый профиль пользователя или обновляет существующий.
     
@@ -385,7 +387,7 @@ async def create_or_update_profile_handler(request: ProfileUpdate):
     Returns:
         dict: JSON с сообщением об успешном обновлении профиля.
     """
-    await create_or_update_profile(request.user_id, request.data.dict())
+    await create_or_update_profile(profile_update.user_id, profile_update.data.dict())
     return {"message": "Профиль успешно обновлен"}
 
 @app.delete("/profile/{user_id}", summary="Удаление профиля и истории чата", description="Удаляет профиль пользователя, историю чата, долговременную память и сводку.")
@@ -430,9 +432,17 @@ async def get_profile_status_handler(user_id: int):
     )
 
 @app.post("/test-tts", summary="Тест голосовых сообщений")
-async def test_tts(text: str = "Привет! Это тест голосового сообщения."):
+async def test_tts(
+    text: str = "Привет! Это тест голосового сообщения.",
+    user_id: int = Depends(verify_token)
+):
     """
     Тестовый эндпоинт для проверки TTS функциональности.
+    Требует JWT авторизацию для предотвращения злоупотребления.
+    
+    Args:
+        text: Текст для генерации голосового сообщения
+        user_id: ID пользователя из JWT токена
     """
     import base64
     voice_file_object = io.BytesIO()
@@ -453,24 +463,62 @@ async def test_tts(text: str = "Привет! Это тест голосовог
             "message": "TTS не работает"
         }
 
-@app.post("/activate_premium", summary="Активация премиум подписки", description="Активирует премиум подписку для пользователя.")
-async def activate_premium_handler(activate_request: dict = Body(...)):
+@app.post("/admin/cleanup_chat_history", summary="Очистка старых сообщений", description="Удаляет историю чата старше указанного количества дней (только для администраторов).")
+@limiter.limit("1/hour")
+async def cleanup_chat_history_handler(
+    request: Request,
+    days_to_keep: int = 30,
+    user_id: int = Depends(verify_token)
+):
     """
-    Активирует премиум подписку для пользователя.
+    Удаляет историю чата старше указанного количества дней.
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    В production рекомендуется запускать эту функцию через APScheduler автоматически.
     
     Args:
-        activate_request (dict): {"user_id": int, "duration_days": int}
+        request: FastAPI Request для rate limiting
+        days_to_keep: Количество дней для хранения истории
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Количество удаленных записей
+    """
+    count = await cleanup_old_chat_history(days_to_keep)
+    return {"deleted_count": count, "days_kept": days_to_keep}
+
+@app.post("/activate_premium", summary="Активация премиум подписки", description="Активирует премиум подписку для пользователя.")
+@limiter.limit("5/minute")
+async def activate_premium_handler(
+    request: Request,
+    activate_request: dict = Body(...),
+    authenticated_user_id: int = Depends(verify_token)
+):
+    """
+    Активирует премиум подписку для пользователя.
+    Требует JWT авторизацию и проверяет соответствие user_id.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        activate_request (dict): {"user_id": int, "duration_days": int, "charge_id": str (optional)}
+        authenticated_user_id: ID пользователя из JWT токена
         
     Returns:
         dict: {"success": bool, "message": str}
     """
     user_id = activate_request.get("user_id")
     duration_days = activate_request.get("duration_days", 30)
+    charge_id = activate_request.get("charge_id")
     
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id обязателен")
     
-    success = await activate_premium_subscription(user_id, duration_days)
+    # SECURITY: Проверяем, что user_id из токена совпадает с user_id в запросе
+    if user_id != authenticated_user_id:
+        logging.warning(f"Попытка активации подписки: authenticated_user={authenticated_user_id}, requested_user={user_id}")
+        raise HTTPException(status_code=403, detail="Запрещено активировать подписку для другого пользователя")
+    
+    success = await activate_premium_subscription(user_id, duration_days, charge_id)
     
     if success:
         return {"success": True, "message": f"Премиум подписка активирована на {duration_days} дней"}

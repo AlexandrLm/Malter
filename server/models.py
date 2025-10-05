@@ -44,12 +44,12 @@ class UserProfile(Base):
     timezone: Mapped[str] = mapped_column(nullable=True)
     relationship_level: Mapped[int] = mapped_column(server_default='1', nullable=False)
     relationship_score: Mapped[int] = mapped_column(server_default='0', nullable=False)
-    level_unlocked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    level_unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     subscription_plan: Mapped[str] = mapped_column(String, server_default='free', nullable=False)
-    subscription_expires: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    subscription_expires: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     daily_message_count: Mapped[int] = mapped_column(server_default='0', nullable=False)
     last_message_date: Mapped[date] = mapped_column(Date, nullable=True)
-    last_processed_payment_charge_id: Mapped[str] = mapped_column(String, nullable=True)
+    last_processed_payment_charge_id: Mapped[str] = mapped_column(String(255), nullable=True)
     
     __table_args__ = (
         Index('idx_subscription_expires', 'subscription_expires'),

@@ -231,6 +231,13 @@ class AIResponseGenerator:
                 "text": "Произошла внутренняя ошибка. Попробуйте еще раз позже.",
                 "image_base64": None
             }
+        finally:
+            # MEMORY LEAK FIX: Явно очищаем большие объекты для освобождения памяти
+            self.history.clear()
+            self.unsummarized_messages = []
+            self.tools = None
+            if self.available_functions:
+                self.available_functions.clear()
 
 
 def _handle_background_task_error(task: asyncio.Task, user_id: int) -> None:
@@ -424,6 +431,8 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
     """
     Обрабатывает данные изображения и возвращает объект Part для Gemini API.
     
+    SECURITY: Валидация размера ДО декодирования для предотвращения DoS атак через memory exhaustion.
+    
     Args:
         image_data (str | None): Данные изображения в формате base64.
         user_id (int): Идентификатор пользователя.
@@ -432,15 +441,22 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
         genai_types.Part | None: Объект Part с изображением или None, если изображение отсутствует или произошла ошибка.
     """
     MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024  # Конвертируем MB в байты
+    # Base64 увеличивает размер на ~33%, поэтому умножаем на 1.4 для проверки
+    MAX_BASE64_SIZE = MAX_IMAGE_SIZE * 1.4
     
     if not image_data:
+        return None
+    
+    # SECURITY: Проверяем размер base64 строки ДО декодирования
+    if len(image_data) > MAX_BASE64_SIZE:
+        logging.warning(f"Base64 изображение слишком большое ({len(image_data)} символов, максимум {int(MAX_BASE64_SIZE)}) для пользователя {user_id}")
         return None
         
     try:
         image_bytes = base64.b64decode(image_data)
         image_size = len(image_bytes)
         
-        # Валидация размера изображения
+        # Дополнительная валидация размера после декодирования (double-check)
         if image_size > MAX_IMAGE_SIZE:
             logging.warning(f"Изображение слишком большое ({image_size} байт, максимум {MAX_IMAGE_SIZE} байт) для пользователя {user_id}")
             return None

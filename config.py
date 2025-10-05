@@ -68,6 +68,10 @@ TYPING_SPEED_CPS = int(os.getenv('TYPING_SPEED_CPS', 15))
 MIN_TYPING_DELAY = float(os.getenv('MIN_TYPING_DELAY', 0.5))
 MAX_TYPING_DELAY = float(os.getenv('MAX_TYPING_DELAY', 4.0))
 
+# HTTPX timeout settings
+HTTPX_TIMEOUT = int(os.getenv('HTTPX_TIMEOUT', 180))  # Общий таймаут в секундах
+HTTPX_CONNECT_TIMEOUT = int(os.getenv('HTTPX_CONNECT_TIMEOUT', 10))  # Таймаут подключения
+
 # --- Redis Configuration ---
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))

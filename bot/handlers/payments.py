@@ -122,12 +122,17 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
     
     days = duration_days[subscription_type]
     
-    # Активируем подписку через API
+    # Получаем JWT токен для безопасного вызова API
+    from ..services.api_client import get_token
+    token = await get_token(client, user_id)
+    
+    # Активируем подписку через API с JWT авторизацией
     response = await make_api_request(
         client,
         "post",
         "/activate_premium",
         user_id=user_id,
+        token=token,
         json={"user_id": user_id, "duration_days": days, "charge_id": payment.telegram_payment_charge_id}
     )
     

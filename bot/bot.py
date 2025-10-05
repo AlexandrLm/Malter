@@ -10,7 +10,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, types
 from aiogram.fsm.storage.redis import RedisStorage
 from redis.asyncio.client import Redis
 
-from config import TELEGRAM_TOKEN, REDIS_HOST, REDIS_PORT, REDIS_DB
+from config import TELEGRAM_TOKEN, REDIS_HOST, REDIS_PORT, REDIS_DB, HTTPX_TIMEOUT, HTTPX_CONNECT_TIMEOUT
 from bot.handlers import router
 
 # Глобальный флаг для graceful shutdown
@@ -86,8 +86,8 @@ async def main():
     signal.signal(signal.SIGINT, signal_handler)
     logging.debug("Обработчики сигналов SIGTERM и SIGINT зарегистрированы")
 
-    # Используем async context manager для httpx клиента
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    # Используем async context manager для httpx клиента с настраиваемыми таймаутами
+    async with httpx.AsyncClient(timeout=httpx.Timeout(HTTPX_TIMEOUT, connect=HTTPX_CONNECT_TIMEOUT)) as client:
         # Добавляем middleware с клиентом
         dp.update.middleware(HttpClientMiddleware(client))
         

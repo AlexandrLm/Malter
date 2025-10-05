@@ -287,6 +287,35 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
         logging.error(f"Ошибка БД при сохранении факта для пользователя {user_id}: {e}", exc_info=True)
         return {"status": "error", "reason": "database_error"}
 
+def sanitize_search_query(query: str) -> str:
+    """
+    Санитизирует поисковый запрос для предотвращения SQL Injection и DoS атак.
+    
+    Args:
+        query: Исходный поисковый запрос
+        
+    Returns:
+        Очищенный запрос или пустая строка если валидация не прошла
+    """
+    import re
+    
+    if not query:
+        return ""
+    
+    # Ограничение длины для предотвращения DoS
+    if len(query) > 100:
+        logging.warning(f"Search query too long: {len(query)} characters")
+        return ""
+    
+    # Удаляем потенциально опасные символы, оставляем только буквы, цифры, пробелы и дефисы
+    # re.UNICODE позволяет использовать кириллицу
+    sanitized = re.sub(r'[^\w\s\-]', '', query, flags=re.UNICODE)
+    
+    # Убираем множественные пробелы
+    sanitized = ' '.join(sanitized.split())
+    
+    return sanitized
+
 async def get_long_term_memories(user_id: int, query: str) -> dict:
     """
     Выполняет полнотекстовый поиск в долгосрочной памяти пользователя.
@@ -295,6 +324,8 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
     и релевантного поиска по фактам. Fallback на ILIKE если полнотекстовый
     поиск не дал результатов.
     
+    SECURITY: Запрос санитизируется перед использованием для предотвращения SQL Injection.
+    
     Args:
         user_id: ID пользователя
         query: Поисковый запрос
@@ -302,7 +333,14 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
     Returns:
         Dict с найденными memories или сообщением об ошибке
     """
-    logging.debug(f"Выполнение полнотекстового поиска для user_id {user_id} с запросом: '{query}'")
+    # SECURITY: Санитизация запроса для предотвращения SQL Injection и DoS
+    sanitized_query = sanitize_search_query(query)
+    
+    if not sanitized_query:
+        logging.warning(f"Invalid or empty search query for user_id {user_id}: '{query}'")
+        return {"memories": ["Поисковый запрос слишком короткий или содержит недопустимые символы."]}
+    
+    logging.debug(f"Выполнение полнотекстового поиска для user_id {user_id} с запросом: '{sanitized_query}'")
     try:
         async with async_session_factory() as session:
             # Используем полнотекстовый поиск PostgreSQL с русским языком
@@ -312,22 +350,22 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
             result = await session.execute(
                 select(LongTermMemory).where(
                     LongTermMemory.user_id == user_id,
-                    LongTermMemory.fact_tsv.op('@@')(func.plainto_tsquery('russian', query))
+                    LongTermMemory.fact_tsv.op('@@')(func.plainto_tsquery('russian', sanitized_query))
                 ).order_by(
                     # Сортируем по релевантности (ts_rank) и времени
-                    func.ts_rank(LongTermMemory.fact_tsv, func.plainto_tsquery('russian', query)).desc(),
+                    func.ts_rank(LongTermMemory.fact_tsv, func.plainto_tsquery('russian', sanitized_query)).desc(),
                     desc(LongTermMemory.timestamp)
                 ).limit(5)
             )
             memories = result.scalars().all()
             
             # Fallback на ILIKE если полнотекстовый поиск не дал результатов
-            if not memories and query:
+            if not memories and sanitized_query:
                 logging.debug(f"Full-text search дал 0 результатов, пробуем ILIKE fallback для user_id {user_id}")
                 result = await session.execute(
                     select(LongTermMemory).where(
                         LongTermMemory.user_id == user_id,
-                        LongTermMemory.fact.ilike(f"%{query}%")
+                        LongTermMemory.fact.ilike(f"%{sanitized_query}%")
                     ).order_by(desc(LongTermMemory.timestamp)).limit(5)
                 )
                 memories = result.scalars().all()
@@ -644,18 +682,65 @@ async def check_subscription_expiry(user_id: int) -> bool:
     
     return profile.subscription_plan == 'premium'
 
+async def cleanup_old_chat_history(days_to_keep: int = 30) -> int:
+    """
+    Удаляет историю чата старше указанного количества дней.
+    
+    Эта функция должна вызываться периодически (например, через APScheduler)
+    для предотвращения бесконечного роста таблицы chat_history.
+    
+    Args:
+        days_to_keep (int): Количество дней для хранения истории чата (по умолчанию 30).
+        
+    Returns:
+        int: Количество удаленных записей.
+    """
+    from datetime import timezone
+    
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
+    logging.info(f"Запуск cleanup старых сообщений (удаляем сообщения старше {cutoff_date})")
+    
+    try:
+        async with async_session_factory() as session:
+            # Подсчитываем количество записей для удаления
+            count_stmt = select(func.count()).select_from(ChatHistory).where(ChatHistory.timestamp < cutoff_date)
+            result = await session.execute(count_stmt)
+            count = result.scalar()
+            
+            if count == 0:
+                logging.info("Нет старых сообщений для удаления")
+                return 0
+            
+            # Удаляем старые записи
+            stmt = delete(ChatHistory).where(ChatHistory.timestamp < cutoff_date)
+            await session.execute(stmt)
+            await session.commit()
+            
+            logging.info(f"Удалено {count} старых сообщений из chat_history")
+            return count
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка при cleanup старых сообщений: {e}", exc_info=True)
+        return 0
+
 async def activate_premium_subscription(user_id: int, duration_days: int = 30, charge_id: str = None) -> bool:
     """
     Активирует премиум подписку для пользователя с проверкой идемпотентности по charge_id.
     
+    SECURITY: Валидация charge_id длины для предотвращения DoS атак на БД.
+    
     Args:
         user_id (int): Уникальный идентификатор пользователя.
         duration_days (int): Длительность подписки в днях.
-        charge_id (str, optional): ID платежа для проверки идемпотентности.
+        charge_id (str, optional): ID платежа для проверки идемпотентности (макс 255 символов).
         
     Returns:
         bool: True если подписка успешно активирована или уже была активирована.
     """
+    # SECURITY: Валидация charge_id длины
+    if charge_id and len(charge_id) > 255:
+        logging.error(f"charge_id слишком длинный для user {user_id}: {len(charge_id)} символов (макс 255)")
+        return False
+    
     try:
         profile = await get_profile(user_id)
         if not profile:
