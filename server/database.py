@@ -597,7 +597,7 @@ async def save_summary(user_id: int, summary_text: str, last_message_id: int):
         data = {
             "summary": summary_text,
             "last_message_id": last_message_id,
-            "timestamp": datetime.now() # Явно обновляем время
+            "timestamp": datetime.now(timezone.utc) # Явно обновляем время
         }
         
         # Создаем оператор insert
@@ -679,7 +679,7 @@ async def check_message_limit(user_id: int) -> dict:
     # Премиум пользователи не имеют ограничений
     if (profile.subscription_plan == 'premium' and 
         profile.subscription_expires and 
-        profile.subscription_expires > datetime.now()):
+        profile.subscription_expires > datetime.now(timezone.utc)):
         return {
             "allowed": True, 
             "message": "premium", 

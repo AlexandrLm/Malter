@@ -3,7 +3,7 @@
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 from server.database import get_profile, create_or_update_profile, check_subscription_expiry
 
@@ -40,11 +40,11 @@ class SubscriptionService:
         
         is_premium = (profile.subscription_plan == 'premium' and 
                      profile.subscription_expires and 
-                     profile.subscription_expires > datetime.now())
+                     profile.subscription_expires > datetime.now(timezone.utc))
         
         days_left = 0
         if is_premium and profile.subscription_expires:
-            days_left = max(0, (profile.subscription_expires - datetime.now()).days)
+            days_left = max(0, (profile.subscription_expires - datetime.now(timezone.utc)).days)
         
         return {
             "plan": profile.subscription_plan,
@@ -83,7 +83,7 @@ class SubscriptionService:
         # Премиум пользователи не имеют ограничений
         if (profile.subscription_plan == 'premium' and 
             profile.subscription_expires and 
-            profile.subscription_expires > datetime.now()):
+            profile.subscription_expires > datetime.now(timezone.utc)):
             return {
                 "allowed": True,
                 "reason": "premium_active",

@@ -24,7 +24,7 @@ from tenacity import (
     before_sleep_log
 )
 from sqlalchemy.exc import SQLAlchemyError
-from redis.exceptions import RedisConnectionError, RedisError
+from redis.exceptions import ConnectionError as RedisConnectionError, RedisError
 import httpx
 import logging
 

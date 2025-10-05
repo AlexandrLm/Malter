@@ -37,22 +37,10 @@ CHAT_REQUESTS_DURATION = Histogram('chat_requests_duration_seconds', 'Duration o
 AI_RESPONSE_DURATION = Histogram('ai_response_duration_seconds', 'Duration of AI response generation')
 TTS_GENERATION_DURATION = Histogram('tts_generation_duration_seconds', 'Duration of TTS generation')
 VOICE_MESSAGES_GENERATED = Counter('voice_messages_generated_total', 'Total number of voice messages generated')
-async def get_limiter_key(request: Request) -> str:
+def get_limiter_key(request: Request) -> str:
     """
-    Извлекает user_id из тела POST-запроса для точного ограничения.
-    Если user_id не найден (например, для GET-запросов), возвращается к IP-адресу.
+    Возвращает IP-адрес клиента для rate limiting.
     """
-    try:
-        # Проверяем, есть ли тело запроса
-        if request.method == "POST" and hasattr(request, "_body"):
-            body = await request.json()
-            user_id = body.get("user_id")
-            if user_id:
-                return str(user_id)
-    except (json.JSONDecodeError, AttributeError, ValueError, UnicodeDecodeError):
-        # Если тело невалидно или это не POST-запрос, возвращаемся к IP
-        pass
-    # Возвращаемся к IP в качестве запасного варианта
     return get_remote_address(request)
 
 limiter = Limiter(key_func=get_limiter_key)
