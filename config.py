@@ -132,5 +132,37 @@ except Exception as e:
 JWT_SECRET = os.getenv("JWT_SECRET")
 if not JWT_SECRET:
     raise ValueError("JWT_SECRET обязателен для безопасности! Установите его в .env файле.")
+
+# Валидация JWT_SECRET силы
+if len(JWT_SECRET) < 32:
+    raise ValueError(
+        f"JWT_SECRET слишком короткий ({len(JWT_SECRET)} символов)! Минимум 32 символа.\n"
+        "Сгенерируйте безопасный ключ: openssl rand -hex 32"
+    )
+
+# Проверка энтропии (простая эвристика)
+unique_chars = len(set(JWT_SECRET))
+if unique_chars < 16:
+    logger.warning(
+        f"JWT_SECRET имеет низкую энтропию ({unique_chars} уникальных символов). "
+        "Рекомендуется использовать криптографически стойкий ключ."
+    )
+
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60  # Token expires in 1 hour
+
+# Encryption Configuration
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    logger.warning(
+        "ENCRYPTION_KEY не установлен! Чувствительные данные будут храниться БЕЗ шифрования.\n"
+        "Для production ОБЯЗАТЕЛЬНО установите ENCRYPTION_KEY.\n"
+        "Генерация: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+elif ENCRYPTION_KEY == "generate_new_key_for_production":
+    logger.error(
+        "❌ ИСПОЛЬЗУЕТСЯ ДЕФОЛТНЫЙ ENCRYPTION_KEY! Это КРИТИЧЕСКАЯ уязвимость безопасности!\n"
+        "Немедленно сгенерируйте новый ключ: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+    if os.getenv('ENVIRONMENT') == 'production':
+        raise ValueError("Нельзя использовать дефолтный ENCRYPTION_KEY в production!")

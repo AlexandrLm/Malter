@@ -13,19 +13,28 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'b2c3d4e5f6a7'
-down_revision: Union[str, Sequence[str], None] = 'f8a3c9d1e2b5'
+down_revision: Union[str, Sequence[str], None] = 'g9h8i7j6k5l4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
     """Upgrade schema: Add index on chat_history (user_id, id) for optimized queries."""
-    op.create_index(
-        'idx_chat_history_user_id_id',
-        'chat_history',
-        ['user_id', 'id'],
-        unique=False
-    )
+    # Проверяем, существует ли индекс, чтобы избежать ошибки
+    from sqlalchemy import inspect
+    conn = op.get_bind()
+    inspector = inspect(conn)
+    indexes = [idx['name'] for idx in inspector.get_indexes('chat_history')]
+    
+    if 'idx_chat_history_user_id_id' not in indexes:
+        op.create_index(
+            'idx_chat_history_user_id_id',
+            'chat_history',
+            ['user_id', 'id'],
+            unique=False
+        )
+    else:
+        print("Index idx_chat_history_user_id_id already exists, skipping")
 
 
 def downgrade() -> None:
