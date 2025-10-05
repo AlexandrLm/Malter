@@ -593,6 +593,242 @@ async def cleanup_chat_history_handler(
     count = await cleanup_old_chat_history(days_to_keep)
     return {"deleted_count": count, "days_kept": days_to_keep}
 
+@app.get("/admin/analytics/overview", summary="Общая аналитика", description="Возвращает общую статистику использования бота (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_overview_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает общую статистику использования бота:
+    - Количество пользователей (total, active, DAU, premium)
+    - Статистика сообщений
+    - Engagement метрики
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Общая статистика
+    """
+    from server.analytics import get_overview_stats
+    stats = await get_overview_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/users", summary="Аналитика пользователей", description="Возвращает детальную статистику о пользователях (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_users_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает детальную статистику пользователей:
+    - Распределение по уровням отношений
+    - Распределение по подпискам
+    - Топ активных пользователей
+    - Новые пользователи
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика пользователей
+    """
+    from server.analytics import get_users_stats
+    stats = await get_users_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/messages", summary="Аналитика сообщений", description="Возвращает статистику сообщений (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_messages_handler(
+    request: Request,
+    days: int = 7,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику сообщений:
+    - Сообщения по дням
+    - Сообщения по часам (пиковая нагрузка)
+    - Соотношение user/model
+    - Средняя длина сообщений
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days: Количество дней для анализа (по умолчанию 7)
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика сообщений
+    """
+    from server.analytics import get_messages_stats
+    stats = await get_messages_stats(days=days)
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/revenue", summary="Аналитика подписок", description="Возвращает статистику подписок и доходов (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_revenue_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику подписок и доходов:
+    - Активные подписки
+    - Новые подписки за период
+    - Истекающие подписки
+    - MRR, ARR
+    - Churn rate
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика подписок и доходов
+    """
+    from server.analytics import get_revenue_stats
+    stats = await get_revenue_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/features", summary="Аналитика функций", description="Возвращает статистику использования функций бота (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_features_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику использования функций:
+    - Использование долговременной памяти
+    - Память по категориям
+    - Количество сводок
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика использования функций
+    """
+    from server.analytics import get_feature_usage_stats
+    stats = await get_feature_usage_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/cohort", summary="Когортный анализ", description="Возвращает retention по когортам (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_cohort_handler(
+    request: Request,
+    days: int = 30,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает когортный анализ:
+    - Retention по дням регистрации (Day 1, Day 7)
+    - Средний retention по всем когортам
+    - Качество аудитории
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days: Количество дней для анализа (по умолчанию 30)
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Когортный анализ
+    """
+    from server.analytics import get_cohort_analysis
+    stats = await get_cohort_analysis(days=days)
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/funnel", summary="Funnel analysis", description="Возвращает воронку прогресса по уровням отношений (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_funnel_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает funnel analysis:
+    - Conversion rates между уровнями
+    - Bottleneck detection (где больше всего отсеивается)
+    - Средний уровень достижения
+    - % conversion до финального уровня
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Funnel analysis
+    """
+    from server.analytics import get_funnel_analysis
+    stats = await get_funnel_analysis()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/activity", summary="Паттерны активности", description="Возвращает активность по дням недели и часам (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_activity_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает паттерны активности:
+    - Активность по дням недели
+    - Пиковые и медленные часы
+    - Средняя длина сессии
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Паттерны активности
+    """
+    from server.analytics import get_activity_patterns
+    stats = await get_activity_patterns()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/tools", summary="Использование AI Tools", description="Возвращает детальную статистику использования функций бота (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_tools_handler(
+    request: Request,
+    days: int = 7,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику использования AI Tools:
+    - Новые факты памяти по дням
+    - Топ-5 категорий памяти
+    - Power users (>5 фактов)
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days: Количество дней для анализа (по умолчанию 7)
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика использования AI Tools
+    """
+    from server.analytics import get_tools_usage_stats
+    stats = await get_tools_usage_stats(days=days)
+    return {"analytics": stats}
+
 @app.post("/activate_premium", summary="Активация премиум подписки", description="Активирует премиум подписку для пользователя.")
 @limiter.limit("5/minute")
 async def activate_premium_handler(
