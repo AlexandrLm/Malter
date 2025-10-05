@@ -1,4 +1,4 @@
-# main.py
+"""Точка входа для запуска бота через python -m bot."""
 import asyncio
 import logging
 import sys
@@ -6,7 +6,6 @@ import sys
 from bot.bot import main
 
 if __name__ == "__main__":
-    # Расширенная настройка логирования
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

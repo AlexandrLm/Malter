@@ -1,14 +1,16 @@
 import logging
-import httpx
-from aiogram import Router, types, F
-from aiogram.types import LabeledPrice, PreCheckoutQuery
-from aiogram.filters import Command
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from config import PAYMENT_PROVIDER_TOKEN
-from ..services.api_client import make_api_request, handle_api_errors
 from collections import defaultdict
 from datetime import datetime, timedelta
+
+import httpx
+from aiogram import F, Router, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import LabeledPrice, PreCheckoutQuery
+
+from config import PAYMENT_PROVIDER_TOKEN
+from ..services.api_client import get_token, make_api_request
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -211,7 +213,7 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
             raise ValueError(f"Invalid payload prefix: {prefix}")
         
         # Проверка subscription type
-        valid_types = ["1month", "3months", "6months", "12months"]
+        valid_types = ["1_month", "3_months", "6_months", "12_months"]
         if subscription_type not in valid_types:
             raise ValueError(f"Invalid subscription type: {subscription_type}")
         
@@ -229,7 +231,7 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
             return
         
         # Проверка цены (защита от манипуляций)
-        expected_price = SUBSCRIPTION_PRICES.get(subscription_type.replace("month", "_month"))
+        expected_price = SUBSCRIPTION_PRICES.get(subscription_type)
         if expected_price and pre_checkout_query.total_amount != expected_price:
             logger.error(
                 f"SECURITY: Price mismatch for user {user_id}! "
@@ -306,7 +308,6 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
     
     try:
         # Получаем JWT токен для безопасного вызова API
-        from ..services.api_client import get_token
         token = await get_token(client, user_id)
         
         # Активируем подписку через API с JWT авторизацией

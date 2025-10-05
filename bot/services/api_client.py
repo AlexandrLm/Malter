@@ -1,8 +1,10 @@
 import logging
-import httpx
 import time
 from functools import wraps
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+from typing import Any, Dict, Optional
+
+import httpx
+
 from config import API_BASE_URL
 from utils.retry_configs import api_client_retry
 
@@ -39,7 +41,20 @@ def handle_api_errors(func):
 
 @api_client_retry
 async def get_token(client: httpx.AsyncClient, user_id: int) -> str:
-    """Получает JWT токен для пользователя."""
+    """
+    Получает JWT токен для пользователя.
+    
+    Args:
+        client: HTTP клиент для запросов
+        user_id: ID пользователя
+        
+    Returns:
+        JWT токен
+        
+    Raises:
+        httpx.HTTPStatusError: При ошибке HTTP
+        httpx.RequestError: При ошибке соединения
+    """
     try:
         response = await client.post(f"{API_BASE_URL}/auth", json={"user_id": user_id})
         response.raise_for_status()
@@ -49,10 +64,34 @@ async def get_token(client: httpx.AsyncClient, user_id: int) -> str:
         logger.error(f"Error getting token for user {user_id}: {e}")
         raise
 
-async def make_api_request(client: httpx.AsyncClient, method: str, endpoint: str, user_id: int = None, token: str = None, **kwargs):
-    """Централизованная функция для выполнения запросов к API с поддержкой JWT."""
+async def make_api_request(
+    client: httpx.AsyncClient,
+    method: str,
+    endpoint: str,
+    user_id: Optional[int] = None,
+    token: Optional[str] = None,
+    **kwargs: Any
+) -> httpx.Response:
+    """
+    Централизованная функция для выполнения запросов к API с поддержкой JWT.
+    
+    Args:
+        client: HTTP клиент для запросов
+        method: HTTP метод (get, post, put, delete)
+        endpoint: Эндпоинт API
+        user_id: ID пользователя (для логирования)
+        token: JWT токен для авторизации
+        **kwargs: Дополнительные параметры для httpx.request
+        
+    Returns:
+        HTTP ответ
+        
+    Raises:
+        httpx.HTTPStatusError: При ошибке HTTP
+        httpx.RequestError: При ошибке соединения
+    """
     url = f"{API_BASE_URL}{endpoint}"
-    headers = kwargs.pop("headers", {})
+    headers: Dict[str, str] = kwargs.pop("headers", {})
     if token:
         headers["Authorization"] = f"Bearer {token}"
         kwargs["headers"] = headers

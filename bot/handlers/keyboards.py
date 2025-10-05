@@ -1,4 +1,4 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 gender_keyboard = ReplyKeyboardMarkup(
     keyboard=[
@@ -7,10 +7,10 @@ gender_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True,
     one_time_keyboard=True
 )
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
-def get_profile_keyboard():
+def get_profile_keyboard() -> InlineKeyboardMarkup:
+    """Возвращает клавиатуру для профиля пользователя."""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔙 Назад в чат", callback_data="back_to_chat")
