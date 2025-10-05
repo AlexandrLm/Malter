@@ -7,7 +7,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from config import DAILY_MESSAGE_LIMIT
 from datetime import datetime
-from ..services.api_client import make_api_request, handle_api_errors
+from ..services.api_client import make_api_request, handle_api_errors, get_token
 from .profile import ProfileStates
 
 router = Router()
@@ -112,10 +112,15 @@ async def test_premium_command(message: types.Message, client: httpx.AsyncClient
     """Тестовая активация премиум-подписки на 30 дней для текущего пользователя"""
     user_id = message.from_user.id
     
+    # Получаем JWT токен для авторизации
+    token = await get_token(client, user_id)
+    
     response = await make_api_request(
         client,
         "post",
         "/activate_premium",
+        user_id=user_id,
+        token=token,
         json={"user_id": user_id, "duration_days": 30}
     )
     

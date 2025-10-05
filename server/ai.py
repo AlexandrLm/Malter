@@ -90,7 +90,8 @@ class AIResponseGenerator:
         """Подготавливает данные для запроса к AI."""
         self.formatted_message = format_user_message(self.user_message, self.profile, self.timestamp)
         self.system_instruction = build_system_instruction(self.profile, self.latest_summary)
-        await save_chat_message(self.user_id, 'user', self.formatted_message)
+        # Передаем timestamp для сообщений пользователя
+        await save_chat_message(self.user_id, 'user', self.formatted_message, timestamp=self.timestamp)
         
         image_part = await process_image_data(self.image_data, self.user_id)
         self.history = await prepare_chat_history(
@@ -171,6 +172,7 @@ class AIResponseGenerator:
             final_response: Финальный ответ для сохранения
         """
         logging.debug(f"Сгенерирован финальный ответ для пользователя {self.user_id}: '{final_response}'")
+        # Не передаем timestamp для ответов модели - будет использоваться server_default из БД
         await save_chat_message(self.user_id, 'model', final_response)
         
         # Запускаем фоновую задачу анализа с обработкой ошибок

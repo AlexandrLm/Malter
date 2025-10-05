@@ -228,9 +228,16 @@ async def create_or_update_profile(user_id: int, data: dict):
         data (dict): Данные профиля для создания или обновления.
     """
     try:
+        # Шифруем поле name, если оно есть, но оставляем ключ как 'name' для соответствия колонке БД
+        db_data = data.copy()
+        if 'name' in db_data:
+            from utils.encryption import encrypt_field
+            db_data['name'] = encrypt_field(db_data['name'])
+        
         async with async_session_factory() as session:
-            stmt = insert(UserProfile).values(user_id=user_id, **data)
-            stmt = stmt.on_conflict_do_update(index_elements=['user_id'], set_=data)
+            # Используем Core-style insert через __table__ чтобы избежать проблем с @property
+            stmt = insert(UserProfile.__table__).values(user_id=user_id, **db_data)
+            stmt = stmt.on_conflict_do_update(index_elements=['user_id'], set_=db_data)
             await session.execute(stmt)
             await session.commit()
     except Exception as e:
@@ -443,10 +450,17 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
         logging.error(f"Неожиданная ошибка при поиске для user_id {user_id}: {e}", exc_info=True)
         return {"status": "error", "reason": "fulltext_search_failed"}
 
-async def save_chat_message(user_id: int, role: str, content: str):
+async def save_chat_message(user_id: int, role: str, content: str, timestamp: datetime | None = None):
     """Сохраняет одно сообщение в историю чата и обновляет счетчик ежедневных сообщений.
     Использует атомарную операцию для предотвращения race conditions.
-    Добавлена санитизация текста с bleach для безопасности."""
+    Добавлена санитизация текста с bleach для безопасности.
+    
+    Args:
+        user_id: ID пользователя
+        role: 'user' или 'model'
+        content: Содержимое сообщения
+        timestamp: Временная метка (если None, используется текущее время БД)
+    """
     # Sanitize content to prevent XSS/prompt injection
     sanitized_content = bleach.clean(content, tags=[], strip=True)
     
@@ -471,7 +485,13 @@ async def save_chat_message(user_id: int, role: str, content: str):
             await session.execute(stmt)
             
             # Сохраняем сообщение в истории чата
-            message = ChatHistory(user_id=user_id, role=role, content=sanitized_content)
+            # Для сообщений модели не передаем timestamp, чтобы БД использовала server_default
+            if timestamp is not None:
+                # Убираем timezone, так как колонка TIMESTAMP WITHOUT TIME ZONE
+                naive_timestamp = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
+                message = ChatHistory(user_id=user_id, role=role, content=sanitized_content, timestamp=naive_timestamp)
+            else:
+                message = ChatHistory(user_id=user_id, role=role, content=sanitized_content)
             session.add(message)
             
             await session.commit()
