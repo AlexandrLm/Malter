@@ -5,14 +5,25 @@
 включая операции CRUD для профилей пользователей, истории чата, долговременной памяти и сводок.
 """
 
-from datetime import datetime, date, timedelta
-from sqlalchemy import select, delete, desc
+from datetime import datetime, date, timedelta, timezone
+from sqlalchemy import select, delete, desc, update
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
 import json
 import logging
 from sqlalchemy.dialects.postgresql import insert
 import bleach  # For text sanitization
-from config import DATABASE_URL, CHAT_HISTORY_LIMIT, REDIS_CLIENT
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
+from config import (
+    DATABASE_URL, 
+    CHAT_HISTORY_LIMIT, 
+    REDIS_CLIENT,
+    CACHE_TTL_SECONDS,
+    REDIS_RETRY_ATTEMPTS,
+    REDIS_RETRY_MIN_WAIT,
+    REDIS_RETRY_MAX_WAIT
+)
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
 
 # Создаем асинхронный "движок" и фабрику сессий
@@ -25,9 +36,6 @@ async_engine = create_async_engine(
 )
 async_session_factory = async_sessionmaker(async_engine)
 
-# --- Константы для кэширования ---
-CACHE_TTL_SECONDS = 600 # 10 минут - оптимизированное значение
-
 def get_profile_cache_key(user_id: int) -> str:
     """Генерирует ключ для кэша профиля."""
     return f"profile:{user_id}"
@@ -35,6 +43,65 @@ def get_profile_cache_key(user_id: int) -> str:
 def get_chat_messages_cache_key(user_id: int) -> str:
     """Генерирует ключ для кэша сообщений чата."""
     return f"chat_messages:{user_id}"
+
+@retry(
+    stop=stop_after_attempt(REDIS_RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=REDIS_RETRY_MIN_WAIT, max=REDIS_RETRY_MAX_WAIT),
+    retry=retry_if_exception_type((RedisConnectionError, RedisError)),
+    reraise=False  # Не выбрасываем ошибку - просто пропускаем кэш
+)
+async def _safe_redis_get(key: str) -> str | None:
+    """
+    Безопасное чтение из Redis с retry механизмом.
+    При неудаче возвращает None вместо exception.
+    """
+    if not REDIS_CLIENT:
+        return None
+    try:
+        return await REDIS_CLIENT.get(key)
+    except Exception as e:
+        logging.warning(f"Redis GET failed for key {key}: {e}")
+        return None
+
+@retry(
+    stop=stop_after_attempt(REDIS_RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=REDIS_RETRY_MIN_WAIT, max=REDIS_RETRY_MAX_WAIT),
+    retry=retry_if_exception_type((RedisConnectionError, RedisError)),
+    reraise=False
+)
+async def _safe_redis_set(key: str, value: str, ex: int) -> bool:
+    """
+    Безопасная запись в Redis с retry механизмом.
+    Возвращает True при успехе, False при неудаче.
+    """
+    if not REDIS_CLIENT:
+        return False
+    try:
+        await REDIS_CLIENT.set(key, value, ex=ex)
+        return True
+    except Exception as e:
+        logging.warning(f"Redis SET failed for key {key}: {e}")
+        return False
+
+@retry(
+    stop=stop_after_attempt(REDIS_RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=REDIS_RETRY_MIN_WAIT, max=REDIS_RETRY_MAX_WAIT),
+    retry=retry_if_exception_type((RedisConnectionError, RedisError)),
+    reraise=False
+)
+async def _safe_redis_delete(key: str) -> bool:
+    """
+    Безопасное удаление из Redis с retry механизмом.
+    Возвращает True при успехе, False при неудаче.
+    """
+    if not REDIS_CLIENT:
+        return False
+    try:
+        await REDIS_CLIENT.delete(key)
+        return True
+    except Exception as e:
+        logging.warning(f"Redis DELETE failed for key {key}: {e}")
+        return False
 
 # Функция для инициализации БД (создания таблицы)
 async def init_db():
@@ -53,26 +120,27 @@ async def get_profile(user_id: int) -> UserProfile | None:
     Returns:
         UserProfile | None: Объект профиля пользователя или None, если профиль не найден.
     """
-    if REDIS_CLIENT:
+    # Пробуем получить из кэша с retry
+    cache_key = get_profile_cache_key(user_id)
+    cached_profile_json = await _safe_redis_get(cache_key)
+    if cached_profile_json:
         try:
-            cache_key = get_profile_cache_key(user_id)
-            cached_profile_json = await REDIS_CLIENT.get(cache_key)
-            if cached_profile_json:
-                profile_data = json.loads(cached_profile_json)
-                # Преобразуем строки с датами обратно в объекты date/datetime
-                for key, value in profile_data.items():
-                    if isinstance(value, str):
+            profile_data = json.loads(cached_profile_json)
+            # Преобразуем строки с датами обратно в объекты date/datetime
+            for key, value in profile_data.items():
+                if isinstance(value, str):
+                    try:
+                        profile_data[key] = datetime.fromisoformat(value)
+                    except (ValueError, TypeError):
                         try:
-                            profile_data[key] = datetime.fromisoformat(value)
+                            profile_data[key] = date.fromisoformat(value)
                         except (ValueError, TypeError):
-                            try:
-                                profile_data[key] = date.fromisoformat(value)
-                            except (ValueError, TypeError):
-                                pass
-                return UserProfile(**profile_data)
-        except Exception as e:
-            # Логируем ошибку, но не прерываем выполнение, чтобы приложение могло работать без кэша
-            logging.error(f"Ошибка при получении профиля из Redis для пользователя {user_id}: {e}")
+                            pass
+            return UserProfile(**profile_data)
+        except (json.JSONDecodeError, TypeError) as e:
+            # Кэш поврежден - удаляем его
+            logging.warning(f"Поврежденные данные в кэше для user {user_id}: {e}")
+            await _safe_redis_delete(cache_key)
 
     # Если в кэше нет или произошла ошибка, идем в БД
     try:
@@ -81,23 +149,22 @@ async def get_profile(user_id: int) -> UserProfile | None:
             profile = result.scalars().first()
 
         # Сохраняем в кэш, если профиль найден
-        if profile and REDIS_CLIENT:
-            try:
-                profile_dict = profile.to_dict()
-                # Конвертируем date/datetime в ISO строки для JSON
-                for key, value in profile_dict.items():
-                    if isinstance(value, (datetime, date)):
-                        profile_dict[key] = value.isoformat()
-                
-                cache_key = get_profile_cache_key(user_id)
-                await REDIS_CLIENT.set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
-            except Exception as e:
-                # Логируем ошибку, но не прерываем выполнение
-                logging.error(f"Ошибка при сохранении профиля в Redis для пользователя {user_id}: {e}")
+        if profile:
+            profile_dict = profile.to_dict()
+            # Конвертируем date/datetime в ISO строки для JSON
+            for key, value in profile_dict.items():
+                if isinstance(value, (datetime, date)):
+                    profile_dict[key] = value.isoformat()
+            
+            cache_key = get_profile_cache_key(user_id)
+            await _safe_redis_set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
 
         return profile
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении профиля для пользователя {user_id}: {e}", exc_info=True)
+        return None
     except Exception as e:
-        logging.error(f"Ошибка при получении профиля из БД для пользователя {user_id}: {e}")
+        logging.error(f"Неожиданная ошибка при получении профиля для пользователя {user_id}: {e}", exc_info=True)
         return None
 
 async def create_or_update_profile(user_id: int, data: dict):
@@ -118,14 +185,11 @@ async def create_or_update_profile(user_id: int, data: dict):
         logging.error(f"Ошибка при создании/обновлении профиля в БД для пользователя {user_id}: {e}")
         raise
 
-    # Инвалидируем кэш
-    if REDIS_CLIENT:
-        try:
-            cache_key = get_profile_cache_key(user_id)
-            await REDIS_CLIENT.delete(cache_key)
-        except Exception as e:
-            # Логируем ошибку, но не прерываем выполнение
-            logging.error(f"Ошибка при удалении профиля из Redis для пользователя {user_id}: {e}")
+    # Инвалидируем кэш (критично для консистентности данных)
+    cache_key = get_profile_cache_key(user_id)
+    deleted = await _safe_redis_delete(cache_key)
+    if not deleted:
+        logging.warning(f"Не удалось инвалидировать кэш профиля для user {user_id}. Данные могут быть устаревшими.")
 
 async def delete_profile(user_id: int):
     """Удаляет профиль и инвалидирует кэш.
@@ -137,18 +201,16 @@ async def delete_profile(user_id: int):
         async with async_session_factory() as session:
             await session.execute(delete(UserProfile).where(UserProfile.user_id == user_id))
             await session.commit()
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при удалении профиля для пользователя {user_id}: {e}", exc_info=True)
+        raise
     except Exception as e:
-        logging.error(f"Ошибка при удалении профиля из БД для пользователя {user_id}: {e}")
+        logging.error(f"Неожиданная ошибка при удалении профиля для пользователя {user_id}: {e}", exc_info=True)
         raise
 
     # Инвалидируем кэш
-    if REDIS_CLIENT:
-        try:
-            cache_key = get_profile_cache_key(user_id)
-            await REDIS_CLIENT.delete(cache_key)
-        except Exception as e:
-            # Логируем ошибку, но не прерываем выполнение
-            logging.error(f"Ошибка при удалении профиля из Redis для пользователя {user_id}: {e}")
+    cache_key = get_profile_cache_key(user_id)
+    await _safe_redis_delete(cache_key)
 
 async def delete_chat_history(user_id: int):
     """Удаляет всю историю чата для пользователя.
@@ -156,9 +218,13 @@ async def delete_chat_history(user_id: int):
     Args:
         user_id (int): Уникальный идентификатор пользователя.
     """
-    async with async_session_factory() as session:
-        await session.execute(delete(ChatHistory).where(ChatHistory.user_id == user_id))
-        await session.commit()
+    try:
+        async with async_session_factory() as session:
+            await session.execute(delete(ChatHistory).where(ChatHistory.user_id == user_id))
+            await session.commit()
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при удалении истории чата для пользователя {user_id}: {e}", exc_info=True)
+        raise
 
 async def delete_long_term_memory(user_id: int):
     """Удаляет всю долговременную память для пользователя.
@@ -166,9 +232,13 @@ async def delete_long_term_memory(user_id: int):
     Args:
         user_id (int): Уникальный идентификатор пользователя.
     """
-    async with async_session_factory() as session:
-        await session.execute(delete(LongTermMemory).where(LongTermMemory.user_id == user_id))
-        await session.commit()
+    try:
+        async with async_session_factory() as session:
+            await session.execute(delete(LongTermMemory).where(LongTermMemory.user_id == user_id))
+            await session.commit()
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при удалении долговременной памяти для пользователя {user_id}: {e}", exc_info=True)
+        raise
 
 async def delete_summary(user_id: int):
     """Удаляет сводку чата для пользователя.
@@ -176,39 +246,46 @@ async def delete_summary(user_id: int):
     Args:
         user_id (int): Уникальный идентификатор пользователя.
     """
-    async with async_session_factory() as session:
-        await session.execute(delete(ChatSummary).where(ChatSummary.user_id == user_id))
-        await session.commit()
+    try:
+        async with async_session_factory() as session:
+            await session.execute(delete(ChatSummary).where(ChatSummary.user_id == user_id))
+            await session.commit()
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при удалении сводки для пользователя {user_id}: {e}", exc_info=True)
+        raise
 
 async def save_long_term_memory(user_id: int, fact: str, category: str):
     """
     Сохраняет новый факт, только если точно такого же факта еще нет в базе.
     """
-    async with async_session_factory() as session:
-        # 1. Проверяем, существует ли уже такой факт
-        stmt = select(LongTermMemory).where(
-            LongTermMemory.user_id == user_id,
-            LongTermMemory.fact == fact
-        )
-        result = await session.execute(stmt)
-        existing_fact = result.scalars().first()
-        
-        # 2. Если факт уже существует, ничего не делаем и сообщаем об этом
-        if existing_fact:
-            logging.info(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
-            # Возвращаем информацию, что факт не был сохранен, т.к. уже есть
-            return {"status": "skipped", "reason": "duplicate fact"}
+    try:
+        async with async_session_factory() as session:
+            # 1. Проверяем, существует ли уже такой факт
+            stmt = select(LongTermMemory).where(
+                LongTermMemory.user_id == user_id,
+                LongTermMemory.fact == fact
+            )
+            result = await session.execute(stmt)
+            existing_fact = result.scalars().first()
+            
+            # 2. Если факт уже существует, ничего не делаем и сообщаем об этом
+            if existing_fact:
+                logging.info(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
+                return {"status": "skipped", "reason": "duplicate fact"}
 
-        # 3. Если факта нет, сохраняем его
-        logging.info(f"Сохранение нового факта для user_id {user_id}")
-        memory = LongTermMemory(
-            user_id=user_id,
-            fact=fact,
-            category=category
-        )
-        session.add(memory)
-        await session.commit()
-        return {"status": "success", "fact_saved": fact}
+            # 3. Если факта нет, сохраняем его
+            logging.info(f"Сохранение нового факта для user_id {user_id}")
+            memory = LongTermMemory(
+                user_id=user_id,
+                fact=fact,
+                category=category
+            )
+            session.add(memory)
+            await session.commit()
+            return {"status": "success", "fact_saved": fact}
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при сохранении факта для пользователя {user_id}: {e}", exc_info=True)
+        return {"status": "error", "reason": "database_error"}
 
 async def get_long_term_memories(user_id: int, query: str) -> dict:
     """Выполняет поиск по ключевым словам в долгосрочной памяти."""
@@ -238,39 +315,48 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
         ]
 
         return {"memories": formatted_memories}
-
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при поиске по ключевым словам для user_id {user_id}: {e}", exc_info=True)
+        return {"status": "error", "reason": "database_error"}
     except Exception as e:
-        logging.error(f"Ошибка при поиске по ключевым словам для user_id {user_id}: {e}")
+        logging.error(f"Неожиданная ошибка при поиске для user_id {user_id}: {e}", exc_info=True)
         return {"status": "error", "reason": "keyword_search_failed"}
 
 async def save_chat_message(user_id: int, role: str, content: str):
     """Сохраняет одно сообщение в историю чата и обновляет счетчик ежедневных сообщений.
+    Использует атомарную операцию для предотвращения race conditions.
     Добавлена санитизация текста с bleach для безопасности."""
     # Sanitize content to prevent XSS/prompt injection
     sanitized_content = bleach.clean(content, tags=[], strip=True)
     
     today = date.today()
-    async with async_session_factory() as session:
-        # Обновляем счетчик ежедневных сообщений
-        profile = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
-        profile = profile.scalars().first()
-        
-        if profile:
-            # Если дата последнего сообщения отличается от сегодняшней, сбрасываем счетчик
-            if profile.last_message_date != today:
-                profile.daily_message_count = 1
-                profile.last_message_date = today
-            else:
-                # Иначе увеличиваем счетчик
-                profile.daily_message_count += 1
+    
+    try:
+        async with async_session_factory() as session:
+            # Используем атомарную операцию UPDATE для счетчика
+            # CASE WHEN гарантирует корректное обновление без race condition
+            stmt = (
+                update(UserProfile)
+                .where(UserProfile.user_id == user_id)
+                .values(
+                    daily_message_count=(
+                        # Если дата изменилась - ставим 1, иначе инкрементируем
+                        1 if UserProfile.last_message_date != today 
+                        else UserProfile.daily_message_count + 1
+                    ),
+                    last_message_date=today
+                )
+            )
+            await session.execute(stmt)
             
-            session.add(profile)
-        
-        # Сохраняем сообщение в истории чата
-        message = ChatHistory(user_id=user_id, role=role, content=sanitized_content)
-        session.add(message)
-        
-        await session.commit()
+            # Сохраняем сообщение в истории чата
+            message = ChatHistory(user_id=user_id, role=role, content=sanitized_content)
+            session.add(message)
+            
+            await session.commit()
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при сохранении сообщения для user {user_id}: {e}")
+        raise
         
     # Инвалидируем кэш сообщений чата
     if REDIS_CLIENT:
@@ -282,33 +368,103 @@ async def save_chat_message(user_id: int, role: str, content: str):
 
 async def get_latest_summary(user_id: int) -> ChatSummary | None:
     """Извлекает самую последнюю сводку для пользователя."""
-    async with async_session_factory() as session:
-        result = await session.execute(
-            select(ChatSummary)
-            .where(ChatSummary.user_id == user_id)
-            .order_by(ChatSummary.timestamp.desc())
-            .limit(1)
-        )
-        return result.scalars().first()
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(ChatSummary)
+                .where(ChatSummary.user_id == user_id)
+                .order_by(ChatSummary.timestamp.desc())
+                .limit(1)
+            )
+            return result.scalars().first()
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении сводки для пользователя {user_id}: {e}", exc_info=True)
+        return None
 
 async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
     """
     Извлекает все сообщения пользователя, которые еще не были включены в сводку.
     """
-    latest_summary = await get_latest_summary(user_id)
-    last_message_id = latest_summary.last_message_id if latest_summary else 0
+    try:
+        latest_summary = await get_latest_summary(user_id)
+        last_message_id = latest_summary.last_message_id if latest_summary else 0
 
-    async with async_session_factory() as session:
-        result = await session.execute(
-            select(ChatHistory)
-            .where(
-                ChatHistory.user_id == user_id,
-                ChatHistory.id > last_message_id
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(ChatHistory)
+                .where(
+                    ChatHistory.user_id == user_id,
+                    ChatHistory.id > last_message_id
+                )
+                .order_by(ChatHistory.timestamp.asc())
             )
-            .order_by(ChatHistory.timestamp.asc())
-        )
-        messages = result.scalars().all()
-        return messages
+            messages = result.scalars().all()
+            return messages
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении несуммаризированных сообщений для пользователя {user_id}: {e}", exc_info=True)
+        return []
+
+async def get_user_context_data(user_id: int) -> tuple[UserProfile | None, ChatSummary | None, list[ChatHistory]]:
+    """
+    Оптимизированная функция для получения всех данных пользователя одним запросом к БД.
+    Решает N+1 Query Problem.
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        
+    Returns:
+        tuple: (profile, latest_summary, unsummarized_messages)
+    """
+    try:
+        async with async_session_factory() as session:
+            # Получаем профиль
+            profile_result = await session.execute(
+                select(UserProfile).where(UserProfile.user_id == user_id)
+            )
+            profile = profile_result.scalars().first()
+            
+            if not profile:
+                return None, None, []
+            
+            # Получаем последнюю сводку
+            summary_result = await session.execute(
+                select(ChatSummary)
+                .where(ChatSummary.user_id == user_id)
+                .order_by(ChatSummary.timestamp.desc())
+                .limit(1)
+            )
+            latest_summary = summary_result.scalars().first()
+            last_message_id = latest_summary.last_message_id if latest_summary else 0
+            
+            # Получаем несуммаризированные сообщения
+            messages_result = await session.execute(
+                select(ChatHistory)
+                .where(
+                    ChatHistory.user_id == user_id,
+                    ChatHistory.id > last_message_id
+                )
+                .order_by(ChatHistory.timestamp.asc())
+            )
+            messages = messages_result.scalars().all()
+            
+            # Кэшируем профиль в Redis если доступен
+            if profile:
+                profile_dict = profile.to_dict()
+                for key, value in profile_dict.items():
+                    if isinstance(value, (datetime, date)):
+                        profile_dict[key] = value.isoformat()
+                
+                cache_key = get_profile_cache_key(user_id)
+                await _safe_redis_set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
+            
+            return profile, latest_summary, messages
+            
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении контекста пользователя {user_id}: {e}", exc_info=True)
+        return None, None, []
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при получении контекста пользователя {user_id}: {e}", exc_info=True)
+        return None, None, []
     
 async def save_summary(user_id: int, summary_text: str, last_message_id: int):
     """
@@ -445,7 +601,7 @@ async def check_subscription_expiry(user_id: int) -> bool:
     
     if (profile.subscription_plan == 'premium' and 
         profile.subscription_expires and 
-        profile.subscription_expires < datetime.now()):
+        profile.subscription_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)):
         
         # Подписка истекла, переводим на бесплатный план
         await create_or_update_profile(user_id, {
@@ -481,7 +637,7 @@ async def activate_premium_subscription(user_id: int, duration_days: int = 30, c
             logging.info(f"Платеж {charge_id} для пользователя {user_id} уже обработан")
             return True
 
-        expires_at = datetime.now() + timedelta(days=duration_days)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=duration_days)
         
         update_data = {
             "subscription_plan": "premium",

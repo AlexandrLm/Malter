@@ -8,6 +8,7 @@
 import logging
 import asyncio
 from functools import partial
+from typing import Any
 import base64
 import io
 from google.genai import types as genai_types
@@ -16,7 +17,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from prompts import BASE_SYSTEM_PROMPT, PREMIUM_SYSTEM_PROMPT
 from server.database import check_subscription_expiry
 from personality_prompts import PERSONALITIES
-from config import CHAT_HISTORY_LIMIT, MODEL_NAME, GEMINI_CLIENT
+from config import (
+    CHAT_HISTORY_LIMIT, 
+    MODEL_NAME, 
+    GEMINI_CLIENT,
+    MAX_AI_ITERATIONS,
+    AI_THINKING_BUDGET,
+    MAX_IMAGE_SIZE_MB
+)
 from server.relationship_config import RELATIONSHIP_LEVELS_CONFIG
 from server.database import (
     get_profile,
@@ -34,6 +42,27 @@ from datetime import datetime
 
 # Глобальная переменная для клиента
 client = GEMINI_CLIENT
+
+def _handle_background_task_error(task: asyncio.Task, user_id: int) -> None:
+    """
+    Обработчик ошибок для фоновых задач.
+    Логирует исключения, которые произошли в фоновых задачах.
+    
+    Args:
+        task (asyncio.Task): Завершённая задача
+        user_id (int): ID пользователя для контекста логирования
+    """
+    try:
+        # Получаем результат задачи - если была ошибка, она будет выброшена
+        task.result()
+    except asyncio.CancelledError:
+        logging.info(f"Фоновая задача анализа для пользователя {user_id} была отменена")
+    except Exception as e:
+        logging.error(
+            f"Ошибка в фоновой задаче анализа для пользователя {user_id}: {e}",
+            exc_info=True,
+            extra={"user_id": user_id, "task_name": "generate_summary_and_analyze"}
+        )
 
 add_memory_function = {
     "name": "save_long_term_memory",
@@ -105,7 +134,7 @@ def generate_user_prompt(profile: UserProfile) -> str:
     topics_str = ", ".join(forbidden_topics)
 
     voice_style = ""
-    if profile.subscription_plan == "premium" and profile.subscription_expires and profile.subscription_expires > datetime.now():
+    if profile.is_premium_active:
         # Dynamic voice style based on relationship level for premium surprise
         if profile.relationship_level >= 3:  # Intimate levels
             voice_style = "\nДля близких уровней отношений используй интимный стиль голоса: начинай с 'Say in a whisper:' перед текстом в [VOICE]."
@@ -163,12 +192,8 @@ def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary |
     Returns:
         str: Сформированный системный промпт.
     """
-    # Check for active premium subscription
-    is_premium = (
-        profile.subscription_plan == "premium"
-        and profile.subscription_expires
-        and profile.subscription_expires > datetime.now()
-    )
+    # Используем новый property для проверки premium
+    is_premium = profile.is_premium_active
     logging.info(f"Building prompt for user {profile.user_id}: {'PREMIUM' if is_premium else 'BASE'} (plan: {profile.subscription_plan}, expires: {profile.subscription_expires})")
 
     user_context = generate_user_prompt(profile)
@@ -216,12 +241,21 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
     Returns:
         genai_types.Part | None: Объект Part с изображением или None, если изображение отсутствует или произошла ошибка.
     """
+    MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024  # Конвертируем MB в байты
+    
     if not image_data:
         return None
         
     try:
         image_bytes = base64.b64decode(image_data)
-        logging.info(f"Обработка изображения размером {len(image_bytes)} байт для пользователя {user_id}")
+        image_size = len(image_bytes)
+        
+        # Валидация размера изображения
+        if image_size > MAX_IMAGE_SIZE:
+            logging.warning(f"Изображение слишком большое ({image_size} байт, максимум {MAX_IMAGE_SIZE} байт) для пользователя {user_id}")
+            return None
+        
+        logging.info(f"Обработка изображения размером {image_size} байт для пользователя {user_id}")
         return genai_types.Part.from_bytes(
             data=image_bytes,
             mime_type='image/jpeg'
@@ -340,15 +374,11 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
         return "Произошла критическая ошибка конфигурации. Попробуйте еще раз позже."
 
     try:
-        # --- Параллельное извлечение данных из БД ---
-        profile_task = get_profile(user_id)
-        summary_task = get_latest_summary(user_id)
-        messages_task = get_unsummarized_messages(user_id)
-
-        profile, latest_summary, unsummarized_messages = await asyncio.gather(
-            profile_task, summary_task, messages_task
-        )
-        # -----------------------------------------
+        # --- Оптимизированное получение данных одним запросом к БД ---
+        # Решает N+1 Query Problem: вместо 3-4 запросов делаем 1
+        from server.database import get_user_context_data
+        profile, latest_summary, unsummarized_messages = await get_user_context_data(user_id)
+        # -------------------------------------------------------------
 
         if not profile:
             logging.error(f"Профиль пользователя {user_id} не найден!")
@@ -369,10 +399,9 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             "generate_image": generate_image,
         }
     
-        max_iterations = 3  # Уменьшено для безопасности
         iteration_count = 0
         image_b64 = None
-        while iteration_count < max_iterations:
+        while iteration_count < MAX_AI_ITERATIONS:
             iteration_count += 1
             contents = history
     
@@ -382,7 +411,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
                 contents=contents,
                 tools=[tools],
                 system_instruction=system_instruction,
-                thinking_budget=0
+                thinking_budget=AI_THINKING_BUDGET
             )
     
             if not response.candidates:
@@ -405,8 +434,11 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
             logging.info(f"Сгенерирован финальный ответ для пользователя {user_id}: '{final_response}'")
             await save_chat_message(user_id, 'model', final_response)
             
+            # Запускаем фоновую задачу анализа с обработкой ошибок
             from server.summarizer import generate_summary_and_analyze
-            asyncio.create_task(generate_summary_and_analyze(user_id))
+            task = asyncio.create_task(generate_summary_and_analyze(user_id))
+            # Добавляем callback для логирования ошибок
+            task.add_done_callback(lambda t: _handle_background_task_error(t, user_id))
             # --------------------------------------------------
     
             # Log usage metadata for monitoring
@@ -415,7 +447,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
     
             return {"text": final_response, "image_base64": image_b64}
     
-        logging.warning(f"Достигнут лимит итераций ({max_iterations}) для пользователя {user_id}.")
+        logging.warning(f"Достигнут лимит итераций ({MAX_AI_ITERATIONS}) для пользователя {user_id}.")
         return {"text": "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое.", "image_base64": None}
     
     except Exception as e:

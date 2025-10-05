@@ -49,6 +49,17 @@ MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, ко
 CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
 DAILY_MESSAGE_LIMIT = 50 # Максимальное количество сообщений в день для бесплатных пользователей
 
+# AI Response settings
+MAX_AI_ITERATIONS = int(os.getenv('MAX_AI_ITERATIONS', 3))  # Максимальное количество итераций при генерации ответа
+AI_THINKING_BUDGET = int(os.getenv('AI_THINKING_BUDGET', 0))  # Бюджет для "мышления" модели
+MAX_IMAGE_SIZE_MB = int(os.getenv('MAX_IMAGE_SIZE_MB', 10))  # Максимальный размер изображения в MB
+
+# Cache settings
+CACHE_TTL_SECONDS = int(os.getenv('CACHE_TTL_SECONDS', 600))  # 10 минут - время жизни кэша
+REDIS_RETRY_ATTEMPTS = int(os.getenv('REDIS_RETRY_ATTEMPTS', 2))  # Количество попыток для Redis операций
+REDIS_RETRY_MIN_WAIT = float(os.getenv('REDIS_RETRY_MIN_WAIT', 0.5))  # Минимальная задержка между попытками (сек)
+REDIS_RETRY_MAX_WAIT = float(os.getenv('REDIS_RETRY_MAX_WAIT', 2.0))  # Максимальная задержка между попытками (сек)
+
 # Subscription settings
 SUBSCRIPTION_DEFAULT_DURATION = 30  # дней
 SUBSCRIPTION_EXPIRY_CHECK_HOURS = 24  # проверка истечения подписки каждые 24 часа
@@ -115,5 +126,7 @@ except Exception as e:
 
 # JWT Configuration
 JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise ValueError("JWT_SECRET обязателен для безопасности! Установите его в .env файле.")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60  # Token expires in 1 hour

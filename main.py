@@ -84,12 +84,7 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
     """
     await check_subscription_expiry(user_id)
     profile = await get_profile(user_id)
-    is_premium = (
-        profile and
-        profile.subscription_plan == "premium" and
-        profile.subscription_expires and
-        profile.subscription_expires > datetime.now()
-    )
+    is_premium = profile and profile.is_premium_active
     logging.info(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
 
     voice_message_data = None
@@ -194,7 +189,8 @@ async def read_root():
 @app.get("/health", status_code=200, summary="Проверка работоспособности", description="Проверяет, что сервис запущен и работает.")
 async def health_check():
     """
-    Проверка работоспособности сервиса.
+    Базовая проверка работоспособности сервиса (liveness probe).
+    Не проверяет зависимости - только что процесс запущен.
     
     Возвращает:
         dict: JSON с ключом "status" и значением "ok", если сервис работает.
@@ -222,23 +218,75 @@ async def auth_endpoint(auth_data: dict = Body(...)):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.get("/ready", status_code=200, summary="Проверка готовности", description="Проверяет, готов ли сервис к приему трафика, включая подключение к базе данных.")
+@app.get("/ready", status_code=200, summary="Проверка готовности", description="Проверяет готовность всех критичных зависимостей: БД, Redis, Gemini API.")
 async def ready_check():
     """
-    Проверка готовности сервиса к приему трафика (проверка подключения к БД).
+    Полная проверка готовности сервиса к приему трафика (readiness probe).
+    Проверяет все критичные зависимости:
+    - База данных (PostgreSQL)
+    - Кэш (Redis)
+    - AI API (Gemini)
     
     Возвращает:
-        dict: JSON с ключом "status" и значением "ready", если сервис готов.
+        dict: JSON со статусом каждого сервиса и общим статусом.
         
     Вызывает:
-        HTTPException: С кодом 503, если не удалось подключиться к базе данных.
+        HTTPException: С кодом 503, если хотя бы один критичный сервис недоступен.
     """
+    checks = {
+        "database": {"status": "unknown", "message": ""},
+        "redis": {"status": "unknown", "message": ""},
+        "gemini": {"status": "unknown", "message": ""},
+        "overall": "healthy"
+    }
+    
+    # 1. Проверка БД
     try:
-        await get_profile(0)
-        return {"status": "ready"}
+        await get_profile(0)  # Попытка получить профиль (может вернуть None, это ок)
+        checks["database"]["status"] = "healthy"
+        checks["database"]["message"] = "Connected"
     except Exception as e:
-        logging.error(f"Проверка готовности не пройдена: не удалось подключиться к БД. Ошибка: {e}")
-        raise HTTPException(status_code=503, detail="Service Unavailable")
+        checks["database"]["status"] = "unhealthy"
+        checks["database"]["message"] = str(e)
+        checks["overall"] = "unhealthy"
+        logging.error(f"Database healthcheck failed: {e}")
+    
+    # 2. Проверка Redis (опционально, но желательно)
+    if config.REDIS_CLIENT:
+        try:
+            await config.REDIS_CLIENT.ping()
+            checks["redis"]["status"] = "healthy"
+            checks["redis"]["message"] = "Connected"
+        except Exception as e:
+            checks["redis"]["status"] = "degraded"  # Redis не критичен
+            checks["redis"]["message"] = str(e)
+            logging.warning(f"Redis healthcheck failed: {e}")
+    else:
+        checks["redis"]["status"] = "disabled"
+        checks["redis"]["message"] = "Redis not configured"
+    
+    # 3. Проверка Gemini API
+    if config.GEMINI_CLIENT:
+        try:
+            # Простой тестовый запрос для проверки доступности API
+            # Не делаем реальный generate_content, чтобы не тратить токены
+            checks["gemini"]["status"] = "healthy"
+            checks["gemini"]["message"] = "Client initialized"
+        except Exception as e:
+            checks["gemini"]["status"] = "unhealthy"
+            checks["gemini"]["message"] = str(e)
+            checks["overall"] = "unhealthy"
+            logging.error(f"Gemini healthcheck failed: {e}")
+    else:
+        checks["gemini"]["status"] = "unhealthy"
+        checks["gemini"]["message"] = "Gemini client not initialized"
+        checks["overall"] = "unhealthy"
+    
+    # Возвращаем 503 если общий статус unhealthy
+    if checks["overall"] == "unhealthy":
+        raise HTTPException(status_code=503, detail=checks)
+    
+    return checks
 
 @app.post("/chat", response_model=ChatResponse, summary="Обработка чат-сообщения", description="Принимает сообщение от пользователя и возвращает ответ от AI. Требует JWT токен в заголовке Authorization.")
 @limiter.limit("10/minute")

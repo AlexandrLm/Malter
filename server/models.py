@@ -49,11 +49,31 @@ class UserProfile(Base):
     daily_message_count: Mapped[int] = mapped_column(server_default='0', nullable=False)
     last_message_date: Mapped[date] = mapped_column(Date, nullable=True)
     last_processed_payment_charge_id: Mapped[str] = mapped_column(String, nullable=True)
+    
+    __table_args__ = (
+        Index('idx_subscription_expires', 'subscription_expires'),
+        Index('idx_last_message_date', 'last_message_date'),
+    )
 
     def to_dict(self):
         # Используем inspect, чтобы автоматически собирать все поля модели
         from sqlalchemy import inspect
         return {c.key: getattr(self, c.key) for c in inspect(self).mapper.column_attrs}
+    
+    @property
+    def is_premium_active(self) -> bool:
+        """
+        Проверяет, активна ли премиум подписка пользователя.
+        
+        Returns:
+            bool: True если подписка активна, False в противном случае.
+        """
+        from datetime import datetime, timezone
+        return (
+            self.subscription_plan == "premium" 
+            and self.subscription_expires is not None
+            and self.subscription_expires.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)
+        )
     
 class LongTermMemory(Base):
     """
@@ -73,6 +93,10 @@ class LongTermMemory(Base):
     fact: Mapped[str] = mapped_column(nullable=False)
     category: Mapped[str] = mapped_column(nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    
+    __table_args__ = (
+        Index('idx_long_term_memory_user_category', 'user_id', 'category'),
+    )
 
 class ChatHistory(Base):
    """

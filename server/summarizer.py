@@ -8,6 +8,8 @@ import logging
 import json
 from pydantic import BaseModel, Field
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from sqlalchemy.exc import SQLAlchemyError
 from config import GEMINI_CLIENT, SUMMARY_THRESHOLD, MESSAGES_TO_SUMMARIZE_COUNT
 from server.database import get_unsummarized_messages, save_summary, delete_summarized_messages, get_profile, create_or_update_profile
 from server.models import ChatHistory, ChatSummary
@@ -132,15 +134,13 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         relationship_analysis = analysis_data.get("relationship_analysis", {})
         quality_score = relationship_analysis.get("quality_score", 0)
 
-        profile = await get_profile(user_id)
-        if profile:
-            await create_or_update_profile(user_id, {
-                "relationship_score": profile.relationship_score + quality_score
-            })
-
-        last_processed_message_id = messages_to_analyze[-1].id
-        await save_summary(user_id, new_summary, last_processed_message_id)
-        await delete_summarized_messages(user_id, last_processed_message_id)
+        # Критичные операции с БД - выполняем с retry
+        await _update_profile_and_summary_with_retry(
+            user_id=user_id,
+            quality_score=quality_score,
+            new_summary=new_summary,
+            last_message_id=messages_to_analyze[-1].id
+        )
 
         await check_for_level_up(user_id)
 
@@ -150,3 +150,47 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
     except Exception as e:
         logging.error(f"Ошибка при анализе для user_id {user_id}: {e}", exc_info=True)
         return None
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(SQLAlchemyError),
+    reraise=True
+)
+async def _update_profile_and_summary_with_retry(
+    user_id: int,
+    quality_score: int,
+    new_summary: str,
+    last_message_id: int
+) -> None:
+    """
+    Критичные операции с БД с retry механизмом.
+    Гарантирует атомарность: либо все операции выполнятся, либо ни одна.
+    
+    Args:
+        user_id: ID пользователя
+        quality_score: Оценка качества общения
+        new_summary: Текст сводки
+        last_message_id: ID последнего обработанного сообщения
+    """
+    try:
+        # 1. Обновляем профиль с новым score
+        profile = await get_profile(user_id)
+        if profile:
+            await create_or_update_profile(user_id, {
+                "relationship_score": profile.relationship_score + quality_score
+            })
+        
+        # 2. Сохраняем сводку
+        await save_summary(user_id, new_summary, last_message_id)
+        
+        # 3. Удаляем обработанные сообщения
+        await delete_summarized_messages(user_id, last_message_id)
+        
+        logging.info(f"Профиль и сводка успешно обновлены для user_id {user_id}")
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при обновлении профиля/сводки для user_id {user_id}: {e}", exc_info=True)
+        raise  # Будет повторная попытка через retry
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при обновлении для user_id {user_id}: {e}", exc_info=True)
+        raise

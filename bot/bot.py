@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import signal
+import sys
 
 import httpx
 from aiogram import BaseMiddleware, Bot, Dispatcher, types
@@ -11,15 +13,27 @@ from redis.asyncio.client import Redis
 from config import TELEGRAM_TOKEN, REDIS_HOST, REDIS_PORT, REDIS_DB
 from bot.handlers import router
 
+# Глобальный флаг для graceful shutdown
+shutdown_event = asyncio.Event()
+
+def signal_handler(signum, frame):
+    """
+    Обработчик сигналов SIGTERM и SIGINT для graceful shutdown.
+    
+    Args:
+        signum: Номер сигнала
+        frame: Текущий stack frame
+    """
+    signal_name = signal.Signals(signum).name
+    logging.info(f"Получен сигнал {signal_name} ({signum}). Начинаем graceful shutdown...")
+    shutdown_event.set()
+
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     
     # Инициализируем хранилище Redis
     redis = Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
     storage = RedisStorage(redis=redis)
-
-    # Создаем httpx клиент, который будет жить все время работы бота
-    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
 
     # Создаем диспетчер и передаем ему хранилище
     dp = Dispatcher(storage=storage)
@@ -61,19 +75,75 @@ async def main():
                 
                 raise  # Re-raise to prevent silent failures
 
-    dp.update.middleware(HttpClientMiddleware(client))
     dp.update.middleware(ErrorMiddleware())
 
     dp.include_router(router)
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    try:
-        logging.info("Запуск polling...")
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
-        await client.aclose()
-        if storage:
-            await storage.close()
-        logging.info("Бот остановлен.")
+    # Регистрируем обработчики сигналов для graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    logging.info("Обработчики сигналов SIGTERM и SIGINT зарегистрированы")
+
+    # Используем async context manager для httpx клиента
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        # Добавляем middleware с клиентом
+        dp.update.middleware(HttpClientMiddleware(client))
+        
+        try:
+            logging.info("Запуск polling...")
+            
+            # Создаём задачу polling
+            polling_task = asyncio.create_task(dp.start_polling(bot))
+            
+            # Создаём задачу ожидания shutdown сигнала
+            shutdown_task = asyncio.create_task(shutdown_event.wait())
+            
+            # Ждём завершения одной из задач
+            done, pending = await asyncio.wait(
+                [polling_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Если получен shutdown сигнал
+            if shutdown_task in done:
+                logging.info("Получен сигнал остановки. Завершаем обработку текущих сообщений...")
+                
+                # Останавливаем polling gracefully
+                await dp.stop_polling()
+                
+                # Даём время на завершение обработки текущих сообщений (макс 10 сек)
+                try:
+                    await asyncio.wait_for(polling_task, timeout=10.0)
+                    logging.info("Все текущие сообщения обработаны")
+                except asyncio.TimeoutError:
+                    logging.warning("Таймаут ожидания завершения обработки сообщений (10s)")
+                    polling_task.cancel()
+                    try:
+                        await polling_task
+                    except asyncio.CancelledError:
+                        pass
+            
+        except Exception as e:
+            logging.error(f"Критическая ошибка в main loop: {e}", exc_info=True)
+        finally:
+            # Cleanup resources
+            logging.info("Начинаем cleanup ресурсов...")
+            
+            # Закрываем сессию бота
+            try:
+                await bot.session.close()
+                logging.info("Bot session закрыта")
+            except Exception as e:
+                logging.error(f"Ошибка при закрытии bot session: {e}")
+            
+            # Закрываем storage
+            if storage:
+                try:
+                    await storage.close()
+                    logging.info("Redis storage закрыт")
+                except Exception as e:
+                    logging.error(f"Ошибка при закрытии storage: {e}")
+            
+            logging.info("Бот полностью остановлен. Goodbye! 👋")
