@@ -4,8 +4,9 @@
 Этот файл определяет модели SQLAlchemy, которые используются для взаимодействия с базой данных.
 """
 
-from sqlalchemy import BigInteger, DateTime, Index, func, JSON, Date, String
+from sqlalchemy import BigInteger, DateTime, Index, func, JSON, Date, String, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from datetime import datetime, date
 
 # Базовый класс для наших моделей
@@ -85,6 +86,7 @@ class LongTermMemory(Base):
         fact (str): Факт о пользователе.
         category (str): Категория факта.
         timestamp (datetime): Дата и время создания записи.
+        fact_tsv (TSVECTOR): Полнотекстовый индекс для быстрого поиска.
     """
     __tablename__ = "long_term_memories"
     
@@ -93,9 +95,17 @@ class LongTermMemory(Base):
     fact: Mapped[str] = mapped_column(nullable=False)
     category: Mapped[str] = mapped_column(nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # Полнотекстовый индекс для быстрого поиска (заполняется автоматически через trigger)
+    fact_tsv: Mapped[TSVECTOR] = mapped_column(
+        TSVECTOR,
+        nullable=True,
+        server_default=text("to_tsvector('russian', fact)")
+    )
     
     __table_args__ = (
         Index('idx_long_term_memory_user_category', 'user_id', 'category'),
+        # GIN индекс для полнотекстового поиска
+        Index('idx_long_term_memory_fact_tsv', 'fact_tsv', postgresql_using='gin'),
     )
 
 class ChatHistory(Base):

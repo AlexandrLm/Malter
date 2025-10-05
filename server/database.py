@@ -288,18 +288,49 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
         return {"status": "error", "reason": "database_error"}
 
 async def get_long_term_memories(user_id: int, query: str) -> dict:
-    """Выполняет поиск по ключевым словам в долгосрочной памяти."""
-    logging.debug(f"Выполнение поиска по ключевым словам для user_id {user_id} с запросом: '{query}'")
+    """
+    Выполняет полнотекстовый поиск в долгосрочной памяти пользователя.
+    
+    Использует PostgreSQL Full-Text Search с русским языком для быстрого
+    и релевантного поиска по фактам. Fallback на ILIKE если полнотекстовый
+    поиск не дал результатов.
+    
+    Args:
+        user_id: ID пользователя
+        query: Поисковый запрос
+        
+    Returns:
+        Dict с найденными memories или сообщением об ошибке
+    """
+    logging.debug(f"Выполнение полнотекстового поиска для user_id {user_id} с запросом: '{query}'")
     try:
         async with async_session_factory() as session:
-            # Используем ilike для регистронезависимого поиска
+            # Используем полнотекстовый поиск PostgreSQL с русским языком
+            # plainto_tsquery автоматически обрабатывает спецсимволы и стоп-слова
+            from sqlalchemy import func, text
+            
             result = await session.execute(
                 select(LongTermMemory).where(
                     LongTermMemory.user_id == user_id,
-                    LongTermMemory.fact.ilike(f"%{query}%")
-                ).order_by(desc(LongTermMemory.timestamp)).limit(5)
+                    LongTermMemory.fact_tsv.op('@@')(func.plainto_tsquery('russian', query))
+                ).order_by(
+                    # Сортируем по релевантности (ts_rank) и времени
+                    func.ts_rank(LongTermMemory.fact_tsv, func.plainto_tsquery('russian', query)).desc(),
+                    desc(LongTermMemory.timestamp)
+                ).limit(5)
             )
             memories = result.scalars().all()
+            
+            # Fallback на ILIKE если полнотекстовый поиск не дал результатов
+            if not memories and query:
+                logging.debug(f"Full-text search дал 0 результатов, пробуем ILIKE fallback для user_id {user_id}")
+                result = await session.execute(
+                    select(LongTermMemory).where(
+                        LongTermMemory.user_id == user_id,
+                        LongTermMemory.fact.ilike(f"%{query}%")
+                    ).order_by(desc(LongTermMemory.timestamp)).limit(5)
+                )
+                memories = result.scalars().all()
 
         if not memories:
             return {"memories": ["Поиск по ключевым словам не дал результатов."]}
@@ -316,11 +347,11 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
 
         return {"memories": formatted_memories}
     except SQLAlchemyError as e:
-        logging.error(f"Ошибка БД при поиске по ключевым словам для user_id {user_id}: {e}", exc_info=True)
+        logging.error(f"Ошибка БД при поиске для user_id {user_id}: {e}", exc_info=True)
         return {"status": "error", "reason": "database_error"}
     except Exception as e:
         logging.error(f"Неожиданная ошибка при поиске для user_id {user_id}: {e}", exc_info=True)
-        return {"status": "error", "reason": "keyword_search_failed"}
+        return {"status": "error", "reason": "fulltext_search_failed"}
 
 async def save_chat_message(user_id: int, role: str, content: str):
     """Сохраняет одно сообщение в историю чата и обновляет счетчик ежедневных сообщений.
