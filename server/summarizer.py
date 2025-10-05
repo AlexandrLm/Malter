@@ -8,6 +8,9 @@ import logging
 import json
 from pydantic import BaseModel, Field
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from sqlalchemy.exc import SQLAlchemyError
+from utils.retry_configs import db_retry
 from config import GEMINI_CLIENT, SUMMARY_THRESHOLD, MESSAGES_TO_SUMMARIZE_COUNT
 from server.database import get_unsummarized_messages, save_summary, delete_summarized_messages, get_profile, create_or_update_profile
 from server.models import ChatHistory, ChatSummary
@@ -104,7 +107,7 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
     all_unsummarized_messages = await get_unsummarized_messages(user_id)
 
     if len(all_unsummarized_messages) < SUMMARY_THRESHOLD:
-        logging.info(f"Недостаточно сообщений для анализа у user_id {user_id}.")
+        logging.debug(f"Недостаточно сообщений для анализа у user_id {user_id}.")
         return None
 
     messages_to_analyze = all_unsummarized_messages[:MESSAGES_TO_SUMMARIZE_COUNT]
@@ -121,7 +124,7 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         
         # Log usage metadata for monitoring
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            logging.info(f"Gemini summarizer usage for user {user_id}: {response.usage_metadata}")
+            logging.debug(f"Gemini summarizer usage for user {user_id}: {response.usage_metadata}")
         
         analysis_data = parse_summary_json(response.text, user_id)
         if not analysis_data:
@@ -132,21 +135,84 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         relationship_analysis = analysis_data.get("relationship_analysis", {})
         quality_score = relationship_analysis.get("quality_score", 0)
 
-        profile = await get_profile(user_id)
-        if profile:
-            await create_or_update_profile(user_id, {
-                "relationship_score": profile.relationship_score + quality_score
-            })
-
-        last_processed_message_id = messages_to_analyze[-1].id
-        await save_summary(user_id, new_summary, last_processed_message_id)
-        await delete_summarized_messages(user_id, last_processed_message_id)
+        # Критичные операции с БД - выполняем с retry
+        await _update_profile_and_summary_with_retry(
+            user_id=user_id,
+            quality_score=quality_score,
+            new_summary=new_summary,
+            last_message_id=messages_to_analyze[-1].id
+        )
 
         await check_for_level_up(user_id)
 
-        logging.info(f"Анализ для user_id {user_id} завершен. Очки: {quality_score}.")
+        logging.debug(f"Анализ для user_id {user_id} завершен. Очки: {quality_score}.")
         return new_summary
 
     except Exception as e:
         logging.error(f"Ошибка при анализе для user_id {user_id}: {e}", exc_info=True)
         return None
+
+@db_retry
+async def _update_profile_and_summary_with_retry(
+    user_id: int,
+    quality_score: int,
+    new_summary: str,
+    last_message_id: int
+) -> None:
+    """
+    Критичные операции с БД с retry механизмом в ОДНОЙ ТРАНЗАКЦИИ.
+    Гарантирует атомарность: либо все операции выполнятся, либо ни одна.
+    
+    Args:
+        user_id: ID пользователя
+        quality_score: Оценка качества общения
+        new_summary: Текст сводки
+        last_message_id: ID последнего обработанного сообщения
+    """
+    from server.database import async_session_factory
+    from sqlalchemy import update, delete
+    from sqlalchemy.dialects.postgresql import insert
+    from server.models import UserProfile, ChatSummary, ChatHistory
+    from datetime import datetime
+    
+    try:
+        # ТРАНЗАКЦИЯ: Все операции в одной сессии с автоматическим rollback при ошибке
+        async with async_session_factory() as session:
+            async with session.begin():
+                # 1. Обновляем relationship_score в профиле
+                stmt = (
+                    update(UserProfile)
+                    .where(UserProfile.user_id == user_id)
+                    .values(relationship_score=UserProfile.relationship_score + quality_score)
+                )
+                await session.execute(stmt)
+                
+                # 2. Сохраняем сводку (UPSERT)
+                data = {
+                    "summary": new_summary,
+                    "last_message_id": last_message_id,
+                    "timestamp": datetime.now()
+                }
+                stmt = insert(ChatSummary).values(user_id=user_id, **data)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['user_id'],
+                    set_=data
+                )
+                await session.execute(stmt)
+                
+                # 3. Удаляем обработанные сообщения
+                stmt = delete(ChatHistory).where(
+                    ChatHistory.user_id == user_id,
+                    ChatHistory.id <= last_message_id
+                )
+                await session.execute(stmt)
+                
+                # Если дошли сюда - все ОК, транзакция будет зафиксирована
+        
+        logging.debug(f"Профиль и сводка успешно обновлены в транзакции для user_id {user_id}")
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при обновлении профиля/сводки для user_id {user_id}: {e}", exc_info=True)
+        raise  # Будет повторная попытка через retry
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при обновлении для user_id {user_id}: {e}", exc_info=True)
+        raise

@@ -59,6 +59,9 @@ services:
       redis:
         condition: service_healthy
     command: ["python", "-m", "bot"]
+    # Graceful shutdown configuration
+    stop_signal: SIGTERM
+    stop_grace_period: 30s  # Даём 30 секунд на graceful shutdown
     logging:
       driver: "json-file"
       options:

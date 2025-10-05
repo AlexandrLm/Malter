@@ -40,13 +40,25 @@ DATABASE_URL = (
 )
 
 # MODEL_NAME = "gemini-2.5-flash-lite"
-MODEL_NAME = "gemini-2.5-flash"
+# MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-flash-latest"
 # MODEL_NAME = "gemini-2.5-pro"
 
 SUMMARY_THRESHOLD = 26 # Количество сообщений для запуска суммирования
 MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, которые будут взяты для создания сводки (и последующего удаления)
 CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
 DAILY_MESSAGE_LIMIT = 50 # Максимальное количество сообщений в день для бесплатных пользователей
+
+# AI Response settings
+MAX_AI_ITERATIONS = int(os.getenv('MAX_AI_ITERATIONS', 3))  # Максимальное количество итераций при генерации ответа
+AI_THINKING_BUDGET = int(os.getenv('AI_THINKING_BUDGET', 0))  # Бюджет для "мышления" модели
+MAX_IMAGE_SIZE_MB = int(os.getenv('MAX_IMAGE_SIZE_MB', 10))  # Максимальный размер изображения в MB
+
+# Cache settings
+CACHE_TTL_SECONDS = int(os.getenv('CACHE_TTL_SECONDS', 600))  # 10 минут - время жизни кэша
+REDIS_RETRY_ATTEMPTS = int(os.getenv('REDIS_RETRY_ATTEMPTS', 2))  # Количество попыток для Redis операций
+REDIS_RETRY_MIN_WAIT = float(os.getenv('REDIS_RETRY_MIN_WAIT', 0.5))  # Минимальная задержка между попытками (сек)
+REDIS_RETRY_MAX_WAIT = float(os.getenv('REDIS_RETRY_MAX_WAIT', 2.0))  # Максимальная задержка между попытками (сек)
 
 # Subscription settings
 SUBSCRIPTION_DEFAULT_DURATION = 30  # дней
@@ -55,6 +67,10 @@ SUBSCRIPTION_EXPIRY_CHECK_HOURS = 24  # проверка истечения по
 TYPING_SPEED_CPS = int(os.getenv('TYPING_SPEED_CPS', 15))
 MIN_TYPING_DELAY = float(os.getenv('MIN_TYPING_DELAY', 0.5))
 MAX_TYPING_DELAY = float(os.getenv('MAX_TYPING_DELAY', 4.0))
+
+# HTTPX timeout settings
+HTTPX_TIMEOUT = int(os.getenv('HTTPX_TIMEOUT', 180))  # Общий таймаут в секундах
+HTTPX_CONNECT_TIMEOUT = int(os.getenv('HTTPX_CONNECT_TIMEOUT', 10))  # Таймаут подключения
 
 # --- Redis Configuration ---
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
@@ -101,12 +117,27 @@ except Exception as e:
     GEMINI_CLIENT = None
     TTS_CLIENT = None
 
-# --- Redis Client ---
+# --- Redis Client with Connection Pool ---
 REDIS_CLIENT = None
+REDIS_POOL = None
 try:
     import redis.asyncio as redis
-    REDIS_CLIENT = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
-    logger.info("Клиент Redis успешно инициализирован.")
+    
+    # Создаем connection pool для эффективного переиспользования соединений
+    REDIS_POOL = redis.ConnectionPool(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        decode_responses=True,
+        max_connections=50,  # Максимум соединений в пуле
+        socket_timeout=5,     # Таймаут операций
+        socket_connect_timeout=5,  # Таймаут подключения
+        retry_on_timeout=True,
+        health_check_interval=30  # Проверка здоровья соединений каждые 30 сек
+    )
+    
+    REDIS_CLIENT = redis.Redis(connection_pool=REDIS_POOL)
+    logger.info("Redis Client с connection pool успешно инициализирован (pool_size=50).")
 except ImportError:
     logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
 except Exception as e:
@@ -114,5 +145,39 @@ except Exception as e:
 
 # JWT Configuration
 JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise ValueError("JWT_SECRET обязателен для безопасности! Установите его в .env файле.")
+
+# Валидация JWT_SECRET силы
+if len(JWT_SECRET) < 32:
+    raise ValueError(
+        f"JWT_SECRET слишком короткий ({len(JWT_SECRET)} символов)! Минимум 32 символа.\n"
+        "Сгенерируйте безопасный ключ: openssl rand -hex 32"
+    )
+
+# Проверка энтропии (простая эвристика)
+unique_chars = len(set(JWT_SECRET))
+if unique_chars < 16:
+    logger.warning(
+        f"JWT_SECRET имеет низкую энтропию ({unique_chars} уникальных символов). "
+        "Рекомендуется использовать криптографически стойкий ключ."
+    )
+
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60  # Token expires in 1 hour
+
+# Encryption Configuration
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    logger.warning(
+        "ENCRYPTION_KEY не установлен! Чувствительные данные будут храниться БЕЗ шифрования.\n"
+        "Для production ОБЯЗАТЕЛЬНО установите ENCRYPTION_KEY.\n"
+        "Генерация: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+elif ENCRYPTION_KEY == "generate_new_key_for_production":
+    logger.error(
+        "❌ ИСПОЛЬЗУЕТСЯ ДЕФОЛТНЫЙ ENCRYPTION_KEY! Это КРИТИЧЕСКАЯ уязвимость безопасности!\n"
+        "Немедленно сгенерируйте новый ключ: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+    if os.getenv('ENVIRONMENT') == 'production':
+        raise ValueError("Нельзя использовать дефолтный ENCRYPTION_KEY в production!")

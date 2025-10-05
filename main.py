@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry, cleanup_old_chat_history, redis_circuit_breaker
+from utils.db_monitoring import get_query_metrics
 from datetime import datetime
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
@@ -36,31 +37,30 @@ CHAT_REQUESTS_DURATION = Histogram('chat_requests_duration_seconds', 'Duration o
 AI_RESPONSE_DURATION = Histogram('ai_response_duration_seconds', 'Duration of AI response generation')
 TTS_GENERATION_DURATION = Histogram('tts_generation_duration_seconds', 'Duration of TTS generation')
 VOICE_MESSAGES_GENERATED = Counter('voice_messages_generated_total', 'Total number of voice messages generated')
-async def get_limiter_key(request: Request) -> str:
+def get_limiter_key(request: Request) -> str:
     """
-    Извлекает user_id из тела POST-запроса для точного ограничения.
-    Если user_id не найден (например, для GET-запросов), возвращается к IP-адресу.
+    Возвращает IP-адрес клиента для rate limiting.
     """
-    try:
-        # Проверяем, есть ли тело запроса
-        if request.method == "POST" and hasattr(request, "_body"):
-            body = await request.json()
-            user_id = body.get("user_id")
-            if user_id:
-                return str(user_id)
-    except (json.JSONDecodeError, AttributeError, ValueError, UnicodeDecodeError):
-        # Если тело невалидно или это не POST-запрос, возвращаемся к IP
-        pass
-    # Возвращаемся к IP в качестве запасного варианта
     return get_remote_address(request)
 
 limiter = Limiter(key_func=get_limiter_key)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запускайте `alembic upgrade head` для применения миграций.
+    # Startup
+    logging.info("🚀 Запуск приложения...")
+    
+    # Запускаем scheduler для фоновых задач
+    from server.scheduler import start_scheduler, shutdown_scheduler
+    start_scheduler()
+    logging.info("✅ Scheduler запущен")
+    
     yield
-    print("Сервер выключается.")
+    
+    # Shutdown
+    logging.info("🛑 Остановка приложения...")
+    shutdown_scheduler()
+    logging.info("✅ Приложение остановлено")
 
 app = FastAPI(
     title="EvolveAI Backend",
@@ -84,13 +84,8 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
     """
     await check_subscription_expiry(user_id)
     profile = await get_profile(user_id)
-    is_premium = (
-        profile and
-        profile.subscription_plan == "premium" and
-        profile.subscription_expires and
-        profile.subscription_expires > datetime.now()
-    )
-    logging.info(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
+    is_premium = profile and profile.is_premium_active
+    logging.debug(f"TTS guard: {'enabled' if is_premium else 'disabled'} for user {user_id} (plan: {profile.subscription_plan if profile else 'none'})")
 
     voice_message_data = None
     has_voice_marker = response_text.startswith('[VOICE]')
@@ -149,7 +144,7 @@ SECRET_KEY = config.JWT_SECRET
 ALGORITHM = config.JWT_ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = config.JWT_EXPIRE_MINUTES
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -159,7 +154,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -194,7 +189,8 @@ async def read_root():
 @app.get("/health", status_code=200, summary="Проверка работоспособности", description="Проверяет, что сервис запущен и работает.")
 async def health_check():
     """
-    Проверка работоспособности сервиса.
+    Базовая проверка работоспособности сервиса (liveness probe).
+    Не проверяет зависимости - только что процесс запущен.
     
     Возвращает:
         dict: JSON с ключом "status" и значением "ok", если сервис работает.
@@ -202,7 +198,8 @@ async def health_check():
     return {"status": "ok"}
 
 @app.post("/auth", summary="Генерация JWT токена", description="Создает JWT токен для пользователя по user_id (для внутреннего использования бота).")
-async def auth_endpoint(auth_data: dict = Body(...)):
+@limiter.limit("10/minute")
+async def auth_endpoint(request: Request, auth_data: dict = Body(...)):
     """
     Генерирует JWT токен для аутентификации API запросов.
     
@@ -222,23 +219,107 @@ async def auth_endpoint(auth_data: dict = Body(...)):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.get("/ready", status_code=200, summary="Проверка готовности", description="Проверяет, готов ли сервис к приему трафика, включая подключение к базе данных.")
+@app.get("/ready", status_code=200, summary="Проверка готовности", description="Проверяет готовность всех критичных зависимостей: БД, Redis, Gemini API.")
 async def ready_check():
     """
-    Проверка готовности сервиса к приему трафика (проверка подключения к БД).
+    Полная проверка готовности сервиса к приему трафика (readiness probe).
+    Проверяет все критичные зависимости:
+    - База данных (PostgreSQL)
+    - Кэш (Redis)
+    - AI API (Gemini)
     
     Возвращает:
-        dict: JSON с ключом "status" и значением "ready", если сервис готов.
+        dict: JSON со статусом каждого сервиса и общим статусом.
         
     Вызывает:
-        HTTPException: С кодом 503, если не удалось подключиться к базе данных.
+        HTTPException: С кодом 503, если хотя бы один критичный сервис недоступен.
     """
+    checks = {
+        "database": {"status": "unknown", "message": ""},
+        "redis": {"status": "unknown", "message": ""},
+        "gemini": {"status": "unknown", "message": ""},
+        "overall": "healthy"
+    }
+    
+    # 1. Проверка БД
     try:
-        await get_profile(0)
-        return {"status": "ready"}
+        await get_profile(0)  # Попытка получить профиль (может вернуть None, это ок)
+        checks["database"]["status"] = "healthy"
+        checks["database"]["message"] = "Connected"
     except Exception as e:
-        logging.error(f"Проверка готовности не пройдена: не удалось подключиться к БД. Ошибка: {e}")
-        raise HTTPException(status_code=503, detail="Service Unavailable")
+        checks["database"]["status"] = "unhealthy"
+        checks["database"]["message"] = str(e)
+        checks["overall"] = "unhealthy"
+        logging.error(f"Database healthcheck failed: {e}")
+    
+    # 2. Проверка Redis (опционально, но желательно) + Circuit Breaker статус
+    if config.REDIS_CLIENT:
+        try:
+            await config.REDIS_CLIENT.ping()
+            cb_state = redis_circuit_breaker.get_state()
+            checks["redis"]["status"] = "healthy" if cb_state == "CLOSED" else "degraded"
+            checks["redis"]["message"] = f"Connected, Circuit Breaker: {cb_state}"
+            checks["redis"]["circuit_breaker"] = {
+                "state": cb_state,
+                "failure_count": redis_circuit_breaker.failure_count
+            }
+        except Exception as e:
+            checks["redis"]["status"] = "degraded"  # Redis не критичен
+            checks["redis"]["message"] = str(e)
+            checks["redis"]["circuit_breaker"] = {
+                "state": redis_circuit_breaker.get_state(),
+                "failure_count": redis_circuit_breaker.failure_count
+            }
+            logging.warning(f"Redis healthcheck failed: {e}")
+    else:
+        checks["redis"]["status"] = "disabled"
+        checks["redis"]["message"] = "Redis not configured"
+    
+    # 3. Проверка Gemini API + Circuit Breaker
+    from utils.circuit_breaker import gemini_circuit_breaker
+    
+    if config.GEMINI_CLIENT:
+        try:
+            cb_stats = gemini_circuit_breaker.get_stats()
+            cb_state = cb_stats["state"]
+            
+            # Определяем статус на основе circuit breaker
+            if cb_state == "CLOSED":
+                checks["gemini"]["status"] = "healthy"
+                checks["gemini"]["message"] = f"Client initialized, Circuit Breaker: {cb_state}"
+            elif cb_state == "HALF_OPEN":
+                checks["gemini"]["status"] = "degraded"
+                checks["gemini"]["message"] = f"Testing recovery, Circuit Breaker: {cb_state}"
+                checks["overall"] = "degraded"
+            else:  # OPEN
+                checks["gemini"]["status"] = "unhealthy"
+                checks["gemini"]["message"] = f"Circuit Breaker OPEN (retry in {cb_stats['time_until_retry']}s)"
+                checks["overall"] = "unhealthy"
+            
+            # Добавляем статистику circuit breaker
+            checks["gemini"]["circuit_breaker"] = {
+                "state": cb_state,
+                "failure_count": cb_stats["failure_count"],
+                "total_calls": cb_stats["total_calls"],
+                "total_blocked": cb_stats["total_blocked"],
+                "success_rate": round(cb_stats["total_successes"] / cb_stats["total_calls"] * 100, 2) if cb_stats["total_calls"] > 0 else 100
+            }
+            
+        except Exception as e:
+            checks["gemini"]["status"] = "unhealthy"
+            checks["gemini"]["message"] = str(e)
+            checks["overall"] = "unhealthy"
+            logging.error(f"Gemini healthcheck failed: {e}")
+    else:
+        checks["gemini"]["status"] = "unhealthy"
+        checks["gemini"]["message"] = "Gemini client not initialized"
+        checks["overall"] = "unhealthy"
+    
+    # Возвращаем 503 если общий статус unhealthy
+    if checks["overall"] == "unhealthy":
+        raise HTTPException(status_code=503, detail=checks)
+    
+    return checks
 
 @app.post("/chat", response_model=ChatResponse, summary="Обработка чат-сообщения", description="Принимает сообщение от пользователя и возвращает ответ от AI. Требует JWT токен в заголовке Authorization.")
 @limiter.limit("10/minute")
@@ -327,7 +408,8 @@ async def get_chat_history_handler(user_id: int):
     return ChatHistory(user_id=user_id, history=chat_history)
 
 @app.post("/profile", summary="Создание или обновление профиля", description="Создает новый профиль пользователя или обновляет существующий.")
-async def create_or_update_profile_handler(request: ProfileUpdate):
+@limiter.limit("20/minute")
+async def create_or_update_profile_handler(request: Request, profile_update: ProfileUpdate):
     """
     Создает новый профиль пользователя или обновляет существующий.
     
@@ -337,7 +419,7 @@ async def create_or_update_profile_handler(request: ProfileUpdate):
     Returns:
         dict: JSON с сообщением об успешном обновлении профиля.
     """
-    await create_or_update_profile(request.user_id, request.data.dict())
+    await create_or_update_profile(profile_update.user_id, profile_update.data.dict())
     return {"message": "Профиль успешно обновлен"}
 
 @app.delete("/profile/{user_id}", summary="Удаление профиля и истории чата", description="Удаляет профиль пользователя, историю чата, долговременную память и сводку.")
@@ -382,9 +464,17 @@ async def get_profile_status_handler(user_id: int):
     )
 
 @app.post("/test-tts", summary="Тест голосовых сообщений")
-async def test_tts(text: str = "Привет! Это тест голосового сообщения."):
+async def test_tts(
+    text: str = "Привет! Это тест голосового сообщения.",
+    user_id: int = Depends(verify_token)
+):
     """
     Тестовый эндпоинт для проверки TTS функциональности.
+    Требует JWT авторизацию для предотвращения злоупотребления.
+    
+    Args:
+        text: Текст для генерации голосового сообщения
+        user_id: ID пользователя из JWT токена
     """
     import base64
     voice_file_object = io.BytesIO()
@@ -405,24 +495,372 @@ async def test_tts(text: str = "Привет! Это тест голосовог
             "message": "TTS не работает"
         }
 
-@app.post("/activate_premium", summary="Активация премиум подписки", description="Активирует премиум подписку для пользователя.")
-async def activate_premium_handler(activate_request: dict = Body(...)):
+@app.get("/admin/db_metrics", summary="Метрики БД", description="Возвращает статистику запросов к БД и slow queries (только для администраторов).")
+@limiter.limit("10/minute")
+async def db_metrics_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
     """
-    Активирует премиум подписку для пользователя.
+    Возвращает метрики производительности БД:
+    - Общее количество запросов
+    - Количество медленных запросов (>1s)
+    - Среднее время выполнения
+    - Процент slow queries
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
     
     Args:
-        activate_request (dict): {"user_id": int, "duration_days": int}
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Метрики производительности БД
+    """
+    metrics = get_query_metrics()
+    return {"db_metrics": metrics}
+
+@app.get("/admin/cache_stats", summary="Статистика кэша", description="Возвращает статистику использования Redis кэша (только для администраторов).")
+@limiter.limit("10/minute")
+async def cache_stats_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику кэша:
+    - Используемая память
+    - Количество ключей
+    - Hit rate (процент попаданий)
+    - Активные соединения
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика кэша
+    """
+    from utils.cache import get_cache_stats
+    stats = await get_cache_stats()
+    return {"cache_stats": stats}
+
+@app.get("/admin/scheduler_status", summary="Статус scheduler", description="Возвращает статус фоновых задач (только для администраторов).")
+@limiter.limit("10/minute")
+async def scheduler_status_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статус scheduler и список запланированных задач.
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статус scheduler и информация о задачах
+    """
+    from server.scheduler import get_scheduler_status
+    status = get_scheduler_status()
+    return {"scheduler": status}
+
+@app.post("/admin/cleanup_chat_history", summary="Очистка старых сообщений", description="Удаляет историю чата старше указанного количества дней (только для администраторов).")
+@limiter.limit("1/hour")
+async def cleanup_chat_history_handler(
+    request: Request,
+    days_to_keep: int = 30,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Удаляет историю чата старше указанного количества дней.
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    Теперь эта функция выполняется автоматически через APScheduler.
+    Этот endpoint оставлен для ручного запуска при необходимости.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days_to_keep: Количество дней для хранения истории
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Количество удаленных записей
+    """
+    count = await cleanup_old_chat_history(days_to_keep)
+    return {"deleted_count": count, "days_kept": days_to_keep}
+
+@app.get("/admin/analytics/overview", summary="Общая аналитика", description="Возвращает общую статистику использования бота (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_overview_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает общую статистику использования бота:
+    - Количество пользователей (total, active, DAU, premium)
+    - Статистика сообщений
+    - Engagement метрики
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Общая статистика
+    """
+    from server.analytics import get_overview_stats
+    stats = await get_overview_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/users", summary="Аналитика пользователей", description="Возвращает детальную статистику о пользователях (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_users_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает детальную статистику пользователей:
+    - Распределение по уровням отношений
+    - Распределение по подпискам
+    - Топ активных пользователей
+    - Новые пользователи
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика пользователей
+    """
+    from server.analytics import get_users_stats
+    stats = await get_users_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/messages", summary="Аналитика сообщений", description="Возвращает статистику сообщений (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_messages_handler(
+    request: Request,
+    days: int = 7,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику сообщений:
+    - Сообщения по дням
+    - Сообщения по часам (пиковая нагрузка)
+    - Соотношение user/model
+    - Средняя длина сообщений
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days: Количество дней для анализа (по умолчанию 7)
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика сообщений
+    """
+    from server.analytics import get_messages_stats
+    stats = await get_messages_stats(days=days)
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/revenue", summary="Аналитика подписок", description="Возвращает статистику подписок и доходов (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_revenue_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику подписок и доходов:
+    - Активные подписки
+    - Новые подписки за период
+    - Истекающие подписки
+    - MRR, ARR
+    - Churn rate
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика подписок и доходов
+    """
+    from server.analytics import get_revenue_stats
+    stats = await get_revenue_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/features", summary="Аналитика функций", description="Возвращает статистику использования функций бота (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_features_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику использования функций:
+    - Использование долговременной памяти
+    - Память по категориям
+    - Количество сводок
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика использования функций
+    """
+    from server.analytics import get_feature_usage_stats
+    stats = await get_feature_usage_stats()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/cohort", summary="Когортный анализ", description="Возвращает retention по когортам (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_cohort_handler(
+    request: Request,
+    days: int = 30,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает когортный анализ:
+    - Retention по дням регистрации (Day 1, Day 7)
+    - Средний retention по всем когортам
+    - Качество аудитории
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days: Количество дней для анализа (по умолчанию 30)
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Когортный анализ
+    """
+    from server.analytics import get_cohort_analysis
+    stats = await get_cohort_analysis(days=days)
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/funnel", summary="Funnel analysis", description="Возвращает воронку прогресса по уровням отношений (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_funnel_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает funnel analysis:
+    - Conversion rates между уровнями
+    - Bottleneck detection (где больше всего отсеивается)
+    - Средний уровень достижения
+    - % conversion до финального уровня
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Funnel analysis
+    """
+    from server.analytics import get_funnel_analysis
+    stats = await get_funnel_analysis()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/activity", summary="Паттерны активности", description="Возвращает активность по дням недели и часам (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_activity_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает паттерны активности:
+    - Активность по дням недели
+    - Пиковые и медленные часы
+    - Средняя длина сессии
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Паттерны активности
+    """
+    from server.analytics import get_activity_patterns
+    stats = await get_activity_patterns()
+    return {"analytics": stats}
+
+@app.get("/admin/analytics/tools", summary="Использование AI Tools", description="Возвращает детальную статистику использования функций бота (только для администраторов).")
+@limiter.limit("10/minute")
+async def analytics_tools_handler(
+    request: Request,
+    days: int = 7,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику использования AI Tools:
+    - Новые факты памяти по дням
+    - Топ-5 категорий памяти
+    - Power users (>5 фактов)
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        days: Количество дней для анализа (по умолчанию 7)
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика использования AI Tools
+    """
+    from server.analytics import get_tools_usage_stats
+    stats = await get_tools_usage_stats(days=days)
+    return {"analytics": stats}
+
+@app.post("/activate_premium", summary="Активация премиум подписки", description="Активирует премиум подписку для пользователя.")
+@limiter.limit("5/minute")
+async def activate_premium_handler(
+    request: Request,
+    activate_request: dict = Body(...),
+    authenticated_user_id: int = Depends(verify_token)
+):
+    """
+    Активирует премиум подписку для пользователя.
+    Требует JWT авторизацию и проверяет соответствие user_id.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        activate_request (dict): {"user_id": int, "duration_days": int, "charge_id": str (optional)}
+        authenticated_user_id: ID пользователя из JWT токена
         
     Returns:
         dict: {"success": bool, "message": str}
     """
     user_id = activate_request.get("user_id")
     duration_days = activate_request.get("duration_days", 30)
+    charge_id = activate_request.get("charge_id")
     
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id обязателен")
     
-    success = await activate_premium_subscription(user_id, duration_days)
+    # SECURITY: Проверяем, что user_id из токена совпадает с user_id в запросе
+    if user_id != authenticated_user_id:
+        logging.warning(f"Попытка активации подписки: authenticated_user={authenticated_user_id}, requested_user={user_id}")
+        raise HTTPException(status_code=403, detail="Запрещено активировать подписку для другого пользователя")
+    
+    success = await activate_premium_subscription(user_id, duration_days, charge_id)
     
     if success:
         return {"success": True, "message": f"Премиум подписка активирована на {duration_days} дней"}
