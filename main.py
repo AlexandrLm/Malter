@@ -47,9 +47,20 @@ limiter = Limiter(key_func=get_limiter_key)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запускайте `alembic upgrade head` для применения миграций.
+    # Startup
+    logging.info("🚀 Запуск приложения...")
+    
+    # Запускаем scheduler для фоновых задач
+    from server.scheduler import start_scheduler, shutdown_scheduler
+    start_scheduler()
+    logging.info("✅ Scheduler запущен")
+    
     yield
-    print("Сервер выключается.")
+    
+    # Shutdown
+    logging.info("🛑 Остановка приложения...")
+    shutdown_scheduler()
+    logging.info("✅ Приложение остановлено")
 
 app = FastAPI(
     title="EvolveAI Backend",
@@ -264,13 +275,36 @@ async def ready_check():
         checks["redis"]["status"] = "disabled"
         checks["redis"]["message"] = "Redis not configured"
     
-    # 3. Проверка Gemini API
+    # 3. Проверка Gemini API + Circuit Breaker
+    from utils.circuit_breaker import gemini_circuit_breaker
+    
     if config.GEMINI_CLIENT:
         try:
-            # Простой тестовый запрос для проверки доступности API
-            # Не делаем реальный generate_content, чтобы не тратить токены
-            checks["gemini"]["status"] = "healthy"
-            checks["gemini"]["message"] = "Client initialized"
+            cb_stats = gemini_circuit_breaker.get_stats()
+            cb_state = cb_stats["state"]
+            
+            # Определяем статус на основе circuit breaker
+            if cb_state == "CLOSED":
+                checks["gemini"]["status"] = "healthy"
+                checks["gemini"]["message"] = f"Client initialized, Circuit Breaker: {cb_state}"
+            elif cb_state == "HALF_OPEN":
+                checks["gemini"]["status"] = "degraded"
+                checks["gemini"]["message"] = f"Testing recovery, Circuit Breaker: {cb_state}"
+                checks["overall"] = "degraded"
+            else:  # OPEN
+                checks["gemini"]["status"] = "unhealthy"
+                checks["gemini"]["message"] = f"Circuit Breaker OPEN (retry in {cb_stats['time_until_retry']}s)"
+                checks["overall"] = "unhealthy"
+            
+            # Добавляем статистику circuit breaker
+            checks["gemini"]["circuit_breaker"] = {
+                "state": cb_state,
+                "failure_count": cb_stats["failure_count"],
+                "total_calls": cb_stats["total_calls"],
+                "total_blocked": cb_stats["total_blocked"],
+                "success_rate": round(cb_stats["total_successes"] / cb_stats["total_calls"] * 100, 2) if cb_stats["total_calls"] > 0 else 100
+            }
+            
         except Exception as e:
             checks["gemini"]["status"] = "unhealthy"
             checks["gemini"]["message"] = str(e)
@@ -486,6 +520,54 @@ async def db_metrics_handler(
     metrics = get_query_metrics()
     return {"db_metrics": metrics}
 
+@app.get("/admin/cache_stats", summary="Статистика кэша", description="Возвращает статистику использования Redis кэша (только для администраторов).")
+@limiter.limit("10/minute")
+async def cache_stats_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статистику кэша:
+    - Используемая память
+    - Количество ключей
+    - Hit rate (процент попаданий)
+    - Активные соединения
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статистика кэша
+    """
+    from utils.cache import get_cache_stats
+    stats = await get_cache_stats()
+    return {"cache_stats": stats}
+
+@app.get("/admin/scheduler_status", summary="Статус scheduler", description="Возвращает статус фоновых задач (только для администраторов).")
+@limiter.limit("10/minute")
+async def scheduler_status_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает статус scheduler и список запланированных задач.
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Статус scheduler и информация о задачах
+    """
+    from server.scheduler import get_scheduler_status
+    status = get_scheduler_status()
+    return {"scheduler": status}
+
 @app.post("/admin/cleanup_chat_history", summary="Очистка старых сообщений", description="Удаляет историю чата старше указанного количества дней (только для администраторов).")
 @limiter.limit("1/hour")
 async def cleanup_chat_history_handler(
@@ -497,7 +579,8 @@ async def cleanup_chat_history_handler(
     Удаляет историю чата старше указанного количества дней.
     
     ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
-    В production рекомендуется запускать эту функцию через APScheduler автоматически.
+    Теперь эта функция выполняется автоматически через APScheduler.
+    Этот endpoint оставлен для ручного запуска при необходимости.
     
     Args:
         request: FastAPI Request для rate limiting

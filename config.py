@@ -117,12 +117,27 @@ except Exception as e:
     GEMINI_CLIENT = None
     TTS_CLIENT = None
 
-# --- Redis Client ---
+# --- Redis Client with Connection Pool ---
 REDIS_CLIENT = None
+REDIS_POOL = None
 try:
     import redis.asyncio as redis
-    REDIS_CLIENT = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
-    logger.info("Клиент Redis успешно инициализирован.")
+    
+    # Создаем connection pool для эффективного переиспользования соединений
+    REDIS_POOL = redis.ConnectionPool(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        decode_responses=True,
+        max_connections=50,  # Максимум соединений в пуле
+        socket_timeout=5,     # Таймаут операций
+        socket_connect_timeout=5,  # Таймаут подключения
+        retry_on_timeout=True,
+        health_check_interval=30  # Проверка здоровья соединений каждые 30 сек
+    )
+    
+    REDIS_CLIENT = redis.Redis(connection_pool=REDIS_POOL)
+    logger.info("Redis Client с connection pool успешно инициализирован (pool_size=50).")
 except ImportError:
     logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
 except Exception as e:

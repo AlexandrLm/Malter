@@ -841,3 +841,45 @@ async def activate_premium_subscription(user_id: int, duration_days: int = 30, c
     except Exception as e:
         logging.error(f"Ошибка активации премиум подписки для пользователя {user_id}: {e}")
         return False
+
+async def check_all_subscriptions_expiry() -> int:
+    """
+    Проверяет истечение подписок для всех пользователей с premium планом.
+    
+    Эта функция должна вызываться периодически (например, через APScheduler)
+    для автоматической деактивации истекших подписок.
+    
+    Returns:
+        int: Количество деактивированных подписок.
+    """
+    try:
+        now_utc = datetime.now(timezone.utc)
+        
+        async with async_session_factory() as session:
+            # Находим всех пользователей с premium планом, у которых истек срок
+            stmt = select(UserProfile).where(
+                UserProfile.subscription_plan == 'premium',
+                UserProfile.subscription_expires != None,
+                UserProfile.subscription_expires < now_utc
+            )
+            result = await session.execute(stmt)
+            expired_users = result.scalars().all()
+            
+            if not expired_users:
+                return 0
+            
+            # Деактивируем подписки
+            expired_count = 0
+            for user in expired_users:
+                await create_or_update_profile(user.user_id, {
+                    "subscription_plan": "free",
+                    "subscription_expires": None
+                })
+                logging.info(f"Деактивирована истекшая подписка для пользователя {user.user_id}")
+                expired_count += 1
+            
+            return expired_count
+            
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка при проверке истечения подписок: {e}", exc_info=True)
+        return 0

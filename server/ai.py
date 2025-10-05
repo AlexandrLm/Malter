@@ -39,6 +39,7 @@ from server.database import (
 )
 import pytz
 from datetime import datetime
+from utils.circuit_breaker import gemini_circuit_breaker, CircuitBreakerError
 
 # Глобальная переменная для клиента
 client = GEMINI_CLIENT
@@ -227,6 +228,12 @@ class AIResponseGenerator:
                 "image_base64": None
             }
             
+        except CircuitBreakerError as e:
+            logging.warning(f"Circuit Breaker открыт для пользователя {self.user_id}: {e}")
+            return {
+                "text": "Извини, сейчас у меня технические проблемы 😔 Попробуй написать через минутку, я быстро все исправлю!",
+                "image_base64": None
+            }
         except Exception as e:
             logging.error(f"Ошибка при генерации ответа для пользователя {self.user_id}: {e}", exc_info=True)
             return {
@@ -592,6 +599,7 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
     generator = AIResponseGenerator(user_id, user_message, timestamp, image_data)
     return await generator.generate()
 
+@gemini_circuit_breaker.call
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10), # Экспоненциальная задержка
@@ -600,7 +608,12 @@ async def generate_ai_response(user_id: int, user_message: str, timestamp: datet
 )
 async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: list, tools: list, system_instruction: str, thinking_budget: int = 0):
     """
-    Выполняет вызов к Gemini API с логикой повторных попыток.
+    Выполняет вызов к Gemini API с логикой повторных попыток и Circuit Breaker защитой.
+    
+    Circuit Breaker защищает от каскадных сбоев:
+    - Блокирует запросы после 5 сбоев подряд
+    - Ждет 60 секунд перед повторной попыткой
+    - Восстанавливается после 2 успешных запросов
     
     Args:
         user_id (int): Уникальный идентификатор пользователя.
@@ -612,6 +625,10 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         
     Returns:
         response: Ответ от API Gemini.
+        
+    Raises:
+        CircuitBreakerError: Если circuit breaker открыт
+        APIError: При ошибках API после retry
     """
     logging.debug(f"Попытка вызова Gemini API для пользователя {user_id}")
     
