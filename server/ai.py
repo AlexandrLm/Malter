@@ -477,14 +477,14 @@ async def prepare_chat_history(unsummarized_messages: list[ChatHistory], formatt
     return history
 
 
-async def manage_function_calls(response, history: list[genai_types.Content], available_functions: dict, user_id: int) -> str | None:
+async def manage_function_calls(response: Any, history: list[genai_types.Content], available_functions: dict[str, Any], user_id: int) -> str | None:
     """
     Обрабатывает вызовы функций моделью Gemini.
     
     Args:
         response: Ответ от Gemini API.
         history (list[genai_types.Content]): Текущая история чата.
-        available_functions (dict): Доступные функции.
+        available_functions (dict[str, Any]): Доступные функции.
         user_id (int): ID пользователя.
         
     Returns:
@@ -525,7 +525,7 @@ async def manage_function_calls(response, history: list[genai_types.Content], av
     return None
 
 
-async def handle_final_response(response, user_id: int, candidate) -> str:
+async def handle_final_response(response: Any, user_id: int, candidate: Any) -> str:
     """
     Обрабатывает финальный ответ от модели, включая fallback'ы для отсутствия текста.
     

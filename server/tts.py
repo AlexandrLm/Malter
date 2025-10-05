@@ -1,5 +1,7 @@
 import os
 import asyncio
+import io
+from typing import Any
 from google.genai import types as genai_types
 from google.genai.errors import APIError
 from pydub import AudioSegment
@@ -7,7 +9,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import logging
 from config import TTS_CLIENT
 
-async def create_telegram_voice_message(text_to_speak: str, output_file_object: object) -> bool:
+async def create_telegram_voice_message(text_to_speak: str, output_file_object: io.BytesIO) -> bool:
     """
     Асинхронно генерирует аудио из текста и сохраняет его в файловый объект
     в формате OGG/OPUS, подходящем для голосовых сообщений Telegram.
@@ -69,7 +71,7 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
     retry=retry_if_exception_type(APIError), # Используем актуальный класс ошибок
     reraise=True
 )
-async def call_tts_api_with_retry(text_to_speak: str):
+async def call_tts_api_with_retry(text_to_speak: str) -> Any:
     """
     Выполняет асинхронный вызов к TTS API Gemini с логикой повторных попыток.
     """
