@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import json
 
-from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry, cleanup_old_chat_history
+from server.database import get_profile, create_or_update_profile, delete_profile, delete_chat_history, delete_long_term_memory, delete_summary, get_unsummarized_messages, check_message_limit, activate_premium_subscription, check_subscription_expiry, cleanup_old_chat_history, redis_circuit_breaker
+from utils.db_monitoring import get_query_metrics
 from datetime import datetime
 from server.ai import generate_ai_response
 from server.tts import create_telegram_voice_message
@@ -252,15 +253,24 @@ async def ready_check():
         checks["overall"] = "unhealthy"
         logging.error(f"Database healthcheck failed: {e}")
     
-    # 2. Проверка Redis (опционально, но желательно)
+    # 2. Проверка Redis (опционально, но желательно) + Circuit Breaker статус
     if config.REDIS_CLIENT:
         try:
             await config.REDIS_CLIENT.ping()
-            checks["redis"]["status"] = "healthy"
-            checks["redis"]["message"] = "Connected"
+            cb_state = redis_circuit_breaker.get_state()
+            checks["redis"]["status"] = "healthy" if cb_state == "CLOSED" else "degraded"
+            checks["redis"]["message"] = f"Connected, Circuit Breaker: {cb_state}"
+            checks["redis"]["circuit_breaker"] = {
+                "state": cb_state,
+                "failure_count": redis_circuit_breaker.failure_count
+            }
         except Exception as e:
             checks["redis"]["status"] = "degraded"  # Redis не критичен
             checks["redis"]["message"] = str(e)
+            checks["redis"]["circuit_breaker"] = {
+                "state": redis_circuit_breaker.get_state(),
+                "failure_count": redis_circuit_breaker.failure_count
+            }
             logging.warning(f"Redis healthcheck failed: {e}")
     else:
         checks["redis"]["status"] = "disabled"
@@ -462,6 +472,31 @@ async def test_tts(
             "success": False,
             "message": "TTS не работает"
         }
+
+@app.get("/admin/db_metrics", summary="Метрики БД", description="Возвращает статистику запросов к БД и slow queries (только для администраторов).")
+@limiter.limit("10/minute")
+async def db_metrics_handler(
+    request: Request,
+    user_id: int = Depends(verify_token)
+):
+    """
+    Возвращает метрики производительности БД:
+    - Общее количество запросов
+    - Количество медленных запросов (>1s)
+    - Среднее время выполнения
+    - Процент slow queries
+    
+    ВАЖНО: Этот endpoint должен быть защищен дополнительной проверкой прав администратора.
+    
+    Args:
+        request: FastAPI Request для rate limiting
+        user_id: ID пользователя из JWT токена (должен быть админ)
+    
+    Returns:
+        dict: Метрики производительности БД
+    """
+    metrics = get_query_metrics()
+    return {"db_metrics": metrics}
 
 @app.post("/admin/cleanup_chat_history", summary="Очистка старых сообщений", description="Удаляет историю чата старше указанного количества дней (только для администраторов).")
 @limiter.limit("1/hour")

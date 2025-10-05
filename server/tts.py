@@ -8,6 +8,7 @@ from pydub import AudioSegment
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
 from config import TTS_CLIENT
+from utils.retry_configs import tts_retry
 
 async def create_telegram_voice_message(text_to_speak: str, output_file_object: io.BytesIO) -> bool:
     """
@@ -65,12 +66,7 @@ async def create_telegram_voice_message(text_to_speak: str, output_file_object: 
         logging.error(f"Ошибка при создании голосового сообщения: {e}", exc_info=True)
         return False
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(APIError), # Используем актуальный класс ошибок
-    reraise=True
-)
+@tts_retry
 async def call_tts_api_with_retry(text_to_speak: str) -> Any:
     """
     Выполняет асинхронный вызов к TTS API Gemini с логикой повторных попыток.

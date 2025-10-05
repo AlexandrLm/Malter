@@ -6,7 +6,7 @@
 """
 
 from datetime import datetime, date, timedelta, timezone
-from sqlalchemy import select, delete, desc, update
+from sqlalchemy import select, delete, desc, update, func
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 import json
@@ -15,6 +15,8 @@ from sqlalchemy.dialects.postgresql import insert
 import bleach  # For text sanitization
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
+from utils.retry_configs import db_retry, redis_retry
+from utils.db_monitoring import setup_query_monitoring, get_query_metrics
 from config import (
     DATABASE_URL, 
     CHAT_HISTORY_LIMIT, 
@@ -36,6 +38,9 @@ async_engine = create_async_engine(
 )
 async_session_factory = async_sessionmaker(async_engine)
 
+# Настраиваем мониторинг запросов
+setup_query_monitoring(async_engine, threshold=1.0)
+
 def get_profile_cache_key(user_id: int) -> str:
     """Генерирует ключ для кэша профиля."""
     return f"profile:{user_id}"
@@ -44,62 +49,109 @@ def get_chat_messages_cache_key(user_id: int) -> str:
     """Генерирует ключ для кэша сообщений чата."""
     return f"chat_messages:{user_id}"
 
-@retry(
-    stop=stop_after_attempt(REDIS_RETRY_ATTEMPTS),
-    wait=wait_exponential(multiplier=1, min=REDIS_RETRY_MIN_WAIT, max=REDIS_RETRY_MAX_WAIT),
-    retry=retry_if_exception_type((RedisConnectionError, RedisError)),
-    reraise=False  # Не выбрасываем ошибку - просто пропускаем кэш
-)
+# --- Circuit Breaker для Redis ---
+class RedisCircuitBreaker:
+    """
+    Circuit Breaker паттерн для защиты от cascade failures при проблемах с Redis.
+    
+    States:
+    - CLOSED: Нормальная работа, все запросы идут к Redis
+    - OPEN: Redis недоступен, запросы сразу возвращают None (30 секунд)
+    - HALF_OPEN: Пробуем восстановить соединение (1 тестовый запрос)
+    """
+    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time: datetime | None = None
+        self.is_open = False
+    
+    def record_success(self):
+        """Запрос успешен - сбрасываем счетчик."""
+        self.failure_count = 0
+        self.is_open = False
+    
+    def record_failure(self):
+        """Запрос провален - увеличиваем счетчик."""
+        self.failure_count += 1
+        self.last_failure_time = datetime.now()
+        
+        if self.failure_count >= self.failure_threshold:
+            self.is_open = True
+            logging.warning(f"Redis Circuit Breaker ОТКРЫТ после {self.failure_count} неудач")
+    
+    def can_attempt(self) -> bool:
+        """Проверяет, можно ли попытаться подключиться к Redis."""
+        if not self.is_open:
+            return True
+        
+        # Circuit breaker открыт - проверяем, прошло ли время восстановления
+        if self.last_failure_time:
+            time_since_failure = (datetime.now() - self.last_failure_time).total_seconds()
+            if time_since_failure >= self.recovery_timeout:
+                logging.info("Redis Circuit Breaker пробует восстановление (HALF-OPEN)")
+                self.is_open = False  # Переходим в HALF-OPEN
+                self.failure_count = self.failure_threshold - 1  # Еще 1 неудача = снова OPEN
+                return True
+        
+        return False
+    
+    def get_state(self) -> str:
+        """Возвращает текущее состояние circuit breaker."""
+        if not self.is_open:
+            return "CLOSED" if self.failure_count == 0 else "HALF_OPEN"
+        return "OPEN"
+
+redis_circuit_breaker = RedisCircuitBreaker()
+
+@redis_retry
 async def _safe_redis_get(key: str) -> str | None:
     """
-    Безопасное чтение из Redis с retry механизмом.
+    Безопасное чтение из Redis с retry механизмом и Circuit Breaker.
     При неудаче возвращает None вместо exception.
     """
-    if not REDIS_CLIENT:
+    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
         return None
     try:
-        return await REDIS_CLIENT.get(key)
+        result = await REDIS_CLIENT.get(key)
+        redis_circuit_breaker.record_success()
+        return result
     except Exception as e:
+        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis GET failed for key {key}: {e}")
         return None
 
-@retry(
-    stop=stop_after_attempt(REDIS_RETRY_ATTEMPTS),
-    wait=wait_exponential(multiplier=1, min=REDIS_RETRY_MIN_WAIT, max=REDIS_RETRY_MAX_WAIT),
-    retry=retry_if_exception_type((RedisConnectionError, RedisError)),
-    reraise=False
-)
+@redis_retry
 async def _safe_redis_set(key: str, value: str, ex: int) -> bool:
     """
-    Безопасная запись в Redis с retry механизмом.
+    Безопасная запись в Redis с retry механизмом и Circuit Breaker.
     Возвращает True при успехе, False при неудаче.
     """
-    if not REDIS_CLIENT:
+    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
         return False
     try:
         await REDIS_CLIENT.set(key, value, ex=ex)
+        redis_circuit_breaker.record_success()
         return True
     except Exception as e:
+        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis SET failed for key {key}: {e}")
         return False
 
-@retry(
-    stop=stop_after_attempt(REDIS_RETRY_ATTEMPTS),
-    wait=wait_exponential(multiplier=1, min=REDIS_RETRY_MIN_WAIT, max=REDIS_RETRY_MAX_WAIT),
-    retry=retry_if_exception_type((RedisConnectionError, RedisError)),
-    reraise=False
-)
+@redis_retry
 async def _safe_redis_delete(key: str) -> bool:
     """
-    Безопасное удаление из Redis с retry механизмом.
+    Безопасное удаление из Redis с retry механизмом и Circuit Breaker.
     Возвращает True при успехе, False при неудаче.
     """
-    if not REDIS_CLIENT:
+    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
         return False
     try:
         await REDIS_CLIENT.delete(key)
+        redis_circuit_breaker.record_success()
         return True
     except Exception as e:
+        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis DELETE failed for key {key}: {e}")
         return False
 

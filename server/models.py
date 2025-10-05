@@ -129,6 +129,7 @@ class ChatHistory(Base):
 
    __table_args__ = (
        Index('idx_chat_history_user_id_timestamp', "user_id", "timestamp"),
+       Index('idx_chat_history_user_id_id', "user_id", "id"),  # Для запросов с id > last_message_id
    )
 
 class ChatSummary(Base):

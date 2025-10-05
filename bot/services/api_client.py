@@ -4,6 +4,7 @@ import time
 from functools import wraps
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from config import API_BASE_URL
+from utils.retry_configs import api_client_retry
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,7 @@ def handle_api_errors(func):
             raise
     return wrapper
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(2),
-    retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
-    reraise=True
-)
+@api_client_retry
 async def get_token(client: httpx.AsyncClient, user_id: int) -> str:
     """Получает JWT токен для пользователя."""
     try:

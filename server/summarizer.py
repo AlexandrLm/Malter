@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from sqlalchemy.exc import SQLAlchemyError
+from utils.retry_configs import db_retry
 from config import GEMINI_CLIENT, SUMMARY_THRESHOLD, MESSAGES_TO_SUMMARIZE_COUNT
 from server.database import get_unsummarized_messages, save_summary, delete_summarized_messages, get_profile, create_or_update_profile
 from server.models import ChatHistory, ChatSummary
@@ -151,12 +152,7 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         logging.error(f"Ошибка при анализе для user_id {user_id}: {e}", exc_info=True)
         return None
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(SQLAlchemyError),
-    reraise=True
-)
+@db_retry
 async def _update_profile_and_summary_with_retry(
     user_id: int,
     quality_score: int,
