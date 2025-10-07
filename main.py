@@ -78,6 +78,30 @@ async def check_message_limits(user_id: int) -> dict:
     limit_check = await check_message_limit(user_id)
     return limit_check
 
+def strip_voice_markers(text: str) -> str:
+    """
+    Удаляет маркер [VOICE] и описание интонации (всё до двоеточия с кавычками).
+    Пример: '[VOICE]Saying with a smile: "Привет!"' -> 'Привет!'
+    """
+    # Удаляем [VOICE]
+    text = text.replace('[VOICE]', '', 1).strip()
+    
+    # Удаляем описание интонации до двоеточия с кавычками
+    # Ищем паттерн: текст до двоеточия, затем пробелы, затем кавычка
+    if ':' in text and '"' in text:
+        colon_idx = text.index(':')
+        quote_idx = text.index('"', colon_idx)
+        # Проверяем что между двоеточием и кавычкой только пробелы
+        between = text[colon_idx+1:quote_idx]
+        if between.strip() == '':
+            # Удаляем всё до кавычки включительно
+            text = text[quote_idx+1:]
+            # Удаляем закрывающую кавычку в конце если есть
+            if text.endswith('"'):
+                text = text[:-1]
+    
+    return text.strip()
+
 async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
     """
     Handles TTS generation for premium users if [VOICE] marker is present.
@@ -91,8 +115,9 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
     has_voice_marker = response_text.startswith('[VOICE]')
     if has_voice_marker:
         if not is_premium:
-            # Strip [VOICE] for non-premium and skip TTS
-            return response_text.replace('[VOICE]', '', 1).strip(), None
+            # Strip [VOICE] and intonation for non-premium and skip TTS
+            clean_text = strip_voice_markers(response_text)
+            return clean_text, None
         else:
             # Proceed with TTS for premium
             text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
@@ -114,8 +139,10 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
                 VOICE_MESSAGES_GENERATED.inc()
                 return text_to_speak, voice_message_data
             else:
-                # Если генерация не удалась, отправляем текстовый fallback
-                return "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!", None
+                # Если генерация не удалась (например, квота закончилась), отправляем текст без голоса и без интонации
+                logging.warning(f"TTS generation failed for user {user_id}, sending text only")
+                clean_text = strip_voice_markers(response_text)
+                return clean_text, None
 
     return response_text, None
 
