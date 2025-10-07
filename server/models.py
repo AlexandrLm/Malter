@@ -144,6 +144,7 @@ class LongTermMemory(Base):
         user_id (int): Уникальный идентификатор пользователя.
         fact (str): Факт о пользователе.
         category (str): Категория факта.
+        intensity (int): Интенсивность эмоции (1-10), используется для категории 'emotion'.
         timestamp (datetime): Дата и время создания записи.
         fact_tsv (TSVECTOR): Полнотекстовый индекс для быстрого поиска.
     """
@@ -153,6 +154,7 @@ class LongTermMemory(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fact: Mapped[str] = mapped_column(nullable=False)
     category: Mapped[str] = mapped_column(nullable=True)
+    intensity: Mapped[int] = mapped_column(nullable=True, server_default='5')
     timestamp: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     # Полнотекстовый индекс для быстрого поиска (заполняется автоматически через trigger)
     fact_tsv: Mapped[TSVECTOR] = mapped_column(

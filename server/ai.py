@@ -30,7 +30,9 @@ from server.database import (
     get_profile,
     UserProfile,
     save_long_term_memory,
+    save_emotional_memory,
     get_long_term_memories,
+    get_emotional_memories,
     save_chat_message,
     get_latest_summary,
     get_unsummarized_messages,
@@ -90,7 +92,7 @@ class AIResponseGenerator:
     async def _prepare_request_data(self) -> None:
         """Подготавливает данные для запроса к AI."""
         self.formatted_message = format_user_message(self.user_message, self.profile, self.timestamp)
-        self.system_instruction = build_system_instruction(self.profile, self.latest_summary)
+        self.system_instruction = await build_system_instruction(self.profile, self.latest_summary)
         # Передаем timestamp для сообщений пользователя
         await save_chat_message(self.user_id, 'user', self.formatted_message, timestamp=self.timestamp)
         
@@ -102,13 +104,14 @@ class AIResponseGenerator:
         )
         
         self.tools = genai_types.Tool(
-            function_declarations=[add_memory_function, get_memories_function, generate_image_function]
+            function_declarations=[add_memory_function, get_memories_function, generate_image_function, remember_emotion_function]
         )
         
         self.available_functions = {
             "save_long_term_memory": partial(save_long_term_memory, self.user_id),
             "get_long_term_memories": partial(get_long_term_memories, self.user_id),
             "generate_image": generate_image,
+            "save_emotional_memory": partial(save_emotional_memory, self.user_id),
         }
     
     async def _process_iteration(self, iteration: int) -> tuple[bool, str | None, str | None]:
@@ -155,6 +158,11 @@ class AIResponseGenerator:
         )
         if tool_image:
             return True, None, tool_image  # Продолжаем с изображением
+        
+        # Если были вызовы функций (не image), продолжаем итерацию
+        if response.function_calls:
+            logging.debug(f"Function call обработан для user {self.user_id}, продолжаем итерацию")
+            return True, None, None  # Продолжаем для получения финального ответа
         
         # Получаем финальный ответ
         final_response = await handle_final_response(response, self.user_id, candidate)
@@ -319,6 +327,29 @@ generate_image_function = {
     }
 }
 
+remember_emotion_function = {
+    "name": "save_emotional_memory",
+    "description": "Сохраняет эмоциональное состояние пользователя с контекстом. Используй когда пользователь выражает СИЛЬНУЮ эмоцию (радость, грусть, гнев, тревогу, волнение). НЕ используй для нейтральных или слабых эмоций. Примеры когда использовать: 'Я так счастлив!', 'Меня это очень расстроило', 'Я невероятно взволнован'. НЕ использовать для: 'все нормально', 'хорошо', 'так себе'.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "emotion": {
+                "type": "string",
+                "description": "Название эмоции на английском: happy, sad, angry, excited, anxious, frustrated, proud, scared, lonely, grateful"
+            },
+            "intensity": {
+                "type": "integer",
+                "description": "Интенсивность эмоции от 1 до 10, где 1 - слабая, 5 - средняя, 10 - очень сильная"
+            },
+            "context": {
+                "type": "string",
+                "description": "Краткий контекст/причина эмоции. Пример: 'получил повышение на работе', 'поссорился с другом'"
+            }
+        },
+        "required": ["emotion", "intensity", "context"]
+    }
+}
+
 def generate_user_prompt(profile: UserProfile) -> str:
     """
     Генерирует часть системного промпта с информацией о пользователе.
@@ -387,9 +418,9 @@ def format_user_message(user_message: str, profile: UserProfile, timestamp: date
     return formatted_message
 
 
-def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary | None) -> str:
+async def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary | None) -> str:
     """
-    Формирует системный промпт для AI.
+    Формирует системный промпт для AI с учётом эмоциональной памяти.
     
     Args:
         profile (UserProfile): Профиль пользователя.
@@ -416,6 +447,16 @@ def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary |
             f"Сводка: {latest_summary.summary}"
         )
         system_instruction += summary_context
+    
+    # Добавляем эмоциональную память
+    emotional_memories = await get_emotional_memories(profile.user_id, limit=3)
+    if emotional_memories:
+        emotions_text = "\n\n🧠 ЭМОЦИОНАЛЬНАЯ ПАМЯТЬ (важные эмоциональные моменты пользователя):\n"
+        for mem in emotional_memories:
+            emotions_text += f"- {mem['emotion']} (интенсивность {mem['intensity']}/10): {mem['context']} ({mem['timestamp']})\n"
+        emotions_text += "\nИспользуй эту информацию для эмпатии и контекста. Можешь ссылаться на эти моменты: 'помнишь, ты тогда так расстроился из-за...'"
+        system_instruction += emotions_text
+        logging.debug(f"Добавлено {len(emotional_memories)} эмоциональных воспоминаний в промпт для user {profile.user_id}")
         
     return system_instruction
 

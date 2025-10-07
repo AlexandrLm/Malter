@@ -80,25 +80,33 @@ async def check_message_limits(user_id: int) -> dict:
 
 def strip_voice_markers(text: str) -> str:
     """
-    Удаляет маркер [VOICE] и описание интонации (всё до двоеточия с кавычками).
-    Пример: '[VOICE]Saying with a smile: "Привет!"' -> 'Привет!'
+    Удаляет маркер [VOICE] и описание интонации.
+    Примеры: 
+      '[VOICE]Saying with a smile: "Привет!"' -> 'Привет!'
+      '[VOICE]Say sadly: Ой, Саш...' -> 'Ой, Саш...'
     """
     # Удаляем [VOICE]
     text = text.replace('[VOICE]', '', 1).strip()
     
-    # Удаляем описание интонации до двоеточия с кавычками
-    # Ищем паттерн: текст до двоеточия, затем пробелы, затем кавычка
-    if ':' in text and '"' in text:
+    # Удаляем описание интонации до двоеточия
+    if ':' in text:
         colon_idx = text.index(':')
-        quote_idx = text.index('"', colon_idx)
-        # Проверяем что между двоеточием и кавычкой только пробелы
-        between = text[colon_idx+1:quote_idx]
-        if between.strip() == '':
-            # Удаляем всё до кавычки включительно
-            text = text[quote_idx+1:]
-            # Удаляем закрывающую кавычку в конце если есть
-            if text.endswith('"'):
-                text = text[:-1]
+        
+        # Случай 1: с кавычками '[VOICE]Say with smile: "Привет"'
+        if '"' in text:
+            quote_idx = text.index('"', colon_idx)
+            between = text[colon_idx+1:quote_idx]
+            if between.strip() == '':
+                text = text[quote_idx+1:]
+                if text.endswith('"'):
+                    text = text[:-1]
+        # Случай 2: без кавычек '[VOICE]Say sadly: Ой, Саш...'
+        else:
+            # Проверяем что перед двоеточием английские слова (Say, Saying, etc)
+            before_colon = text[:colon_idx].strip()
+            # Если это похоже на инструкцию (начинается с Say), удаляем
+            if before_colon.lower().startswith('say'):
+                text = text[colon_idx+1:].strip()
     
     return text.strip()
 

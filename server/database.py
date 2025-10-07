@@ -313,9 +313,15 @@ async def delete_summary(user_id: int):
         logging.error(f"Ошибка БД при удалении сводки для пользователя {user_id}: {e}", exc_info=True)
         raise
 
-async def save_long_term_memory(user_id: int, fact: str, category: str):
+async def save_long_term_memory(user_id: int, fact: str, category: str, intensity: int = 5):
     """
     Сохраняет новый факт, только если точно такого же факта еще нет в базе.
+    
+    Args:
+        user_id: ID пользователя
+        fact: Текст факта или эмоции
+        category: Категория ('preferences', 'memories', 'work', 'emotion', и т.д.)
+        intensity: Интенсивность (1-10), используется для категории 'emotion'
     """
     try:
         async with async_session_factory() as session:
@@ -333,11 +339,12 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
                 return {"status": "skipped", "reason": "duplicate fact"}
 
             # 3. Если факта нет, сохраняем его
-            logging.debug(f"Сохранение нового факта для user_id {user_id}")
+            logging.debug(f"Сохранение нового факта для user_id {user_id} (category: {category}, intensity: {intensity})")
             memory = LongTermMemory(
                 user_id=user_id,
                 fact=fact,
-                category=category
+                category=category,
+                intensity=intensity
             )
             session.add(memory)
             await session.commit()
@@ -345,6 +352,90 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
     except SQLAlchemyError as e:
         logging.error(f"Ошибка БД при сохранении факта для пользователя {user_id}: {e}", exc_info=True)
         return {"status": "error", "reason": "database_error"}
+
+
+async def save_emotional_memory(user_id: int, emotion: str, intensity: int, context: str):
+    """
+    Сохраняет эмоциональное воспоминание пользователя.
+    Это специализированная функция для категории 'emotion' с обязательной интенсивностью.
+    
+    Args:
+        user_id: ID пользователя
+        emotion: Название эмоции (happy, sad, angry, excited, anxious, и т.д.)
+        intensity: Интенсивность эмоции от 1 до 10
+        context: Контекст/триггер эмоции
+        
+    Returns:
+        dict: Статус сохранения
+    """
+    # Валидация intensity
+    if not isinstance(intensity, int) or not (1 <= intensity <= 10):
+        logging.warning(f"Invalid intensity {intensity} for user {user_id}, clamping to range 1-10")
+        intensity = max(1, min(10, int(intensity)))
+    
+    # Формируем факт в виде: "Emotion: happy (context: получил хорошие новости)"
+    fact = f"Emotion: {emotion} (context: {context})"
+    
+    return await save_long_term_memory(user_id, fact, category="emotion", intensity=intensity)
+
+
+async def get_emotional_memories(user_id: int, limit: int = 5) -> list[dict]:
+    """
+    Получает последние эмоциональные воспоминания пользователя, отсортированные по интенсивности и времени.
+    
+    Args:
+        user_id: ID пользователя
+        limit: Максимальное количество воспоминаний (по умолчанию 5)
+        
+    Returns:
+        list[dict]: Список эмоциональных воспоминаний с полями emotion, intensity, context, timestamp
+    """
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(LongTermMemory)
+                .where(
+                    LongTermMemory.user_id == user_id,
+                    LongTermMemory.category == "emotion"
+                )
+                .order_by(
+                    desc(LongTermMemory.intensity),  # Сначала более интенсивные
+                    desc(LongTermMemory.timestamp)   # Затем более свежие
+                )
+                .limit(limit)
+            )
+            memories = result.scalars().all()
+            
+            if not memories:
+                return []
+            
+            # Парсим и форматируем результат
+            formatted_memories = []
+            for mem in memories:
+                # Парсим факт вида "Emotion: happy (context: получил хорошие новости)"
+                import re
+                match = re.match(r"Emotion: (\w+) \(context: (.+)\)", mem.fact)
+                if match:
+                    emotion, context = match.groups()
+                    formatted_memories.append({
+                        "emotion": emotion,
+                        "intensity": mem.intensity,
+                        "context": context,
+                        "timestamp": str(mem.timestamp)
+                    })
+                else:
+                    # Fallback если формат не совпадает
+                    formatted_memories.append({
+                        "emotion": "unknown",
+                        "intensity": mem.intensity,
+                        "context": mem.fact,
+                        "timestamp": str(mem.timestamp)
+                    })
+            
+            return formatted_memories
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении эмоциональных воспоминаний для пользователя {user_id}: {e}", exc_info=True)
+        return []
 
 def sanitize_search_query(query: str) -> str:
     """
