@@ -662,6 +662,56 @@ async def get_all_user_ids() -> list[int]:
         logging.error(f"Ошибка при получении списка всех пользователей: {e}")
         return []
 
+async def get_last_message_time(user_id: int) -> datetime | None:
+    """
+    Получает timestamp последнего сообщения пользователя (от user или от model).
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        
+    Returns:
+        datetime | None: Время последнего сообщения или None если истории нет.
+    """
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(ChatHistory.timestamp)
+                .where(ChatHistory.user_id == user_id)
+                .order_by(ChatHistory.timestamp.desc())
+                .limit(1)
+            )
+            row = result.first()
+            return row[0] if row else None
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении времени последнего сообщения для user {user_id}: {e}")
+        return None
+
+async def get_active_users_for_proactive() -> list[UserProfile]:
+    """
+    Получает список активных пользователей для проактивных сообщений.
+    Фильтры:
+    - Последнее сообщение в течение 7 дней
+    - Имеют настроенный timezone
+    
+    Returns:
+        list[UserProfile]: Список профилей активных пользователей.
+    """
+    try:
+        cutoff_date = date.today() - timedelta(days=7)
+        
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(UserProfile).where(
+                    UserProfile.last_message_date >= cutoff_date,
+                    UserProfile.timezone.isnot(None)  # Только с указанной timezone
+                )
+            )
+            profiles = result.scalars().all()
+            return list(profiles)
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении активных пользователей: {e}")
+        return []
+
 async def check_message_limit(user_id: int) -> dict:
     """
     Проверяет лимит сообщений для пользователя.
