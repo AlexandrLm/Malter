@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 
-from config import PAYMENT_PROVIDER_TOKEN
+from config import PAYMENT_PROVIDER_TOKEN, PAYMENT_PHOTO_URL
 from ..services.api_client import get_token, make_api_request
 
 router = Router()
@@ -169,7 +169,7 @@ async def handle_subscription_choice(callback: types.CallbackQuery, state: FSMCo
             currency="RUB",
             prices=[LabeledPrice(label=f"Премиум подписка ({days} дней)", amount=price)],
             start_parameter="premium_subscription",
-            photo_url="https://via.placeholder.com/400x200/6C5CE7/FFFFFF?text=Premium+EvolveAI",
+            photo_url=PAYMENT_PHOTO_URL,
             photo_width=400,
             photo_height=200
         )

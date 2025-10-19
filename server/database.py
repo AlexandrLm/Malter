@@ -6,7 +6,7 @@
 """
 
 from datetime import datetime, date, timedelta, timezone
-from sqlalchemy import select, delete, desc, update, func
+from sqlalchemy import select, delete, desc, update, func, asc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 import json
@@ -358,24 +358,74 @@ async def save_emotional_memory(user_id: int, emotion: str, intensity: int, cont
     """
     Сохраняет эмоциональное воспоминание пользователя.
     Это специализированная функция для категории 'emotion' с обязательной интенсивностью.
-    
+
+    Если количество эмоциональных воспоминаний превышает лимит, удаляются самые старые
+    с низкой интенсивностью.
+
     Args:
         user_id: ID пользователя
         emotion: Название эмоции (happy, sad, angry, excited, anxious, и т.д.)
         intensity: Интенсивность эмоции от 1 до 10
         context: Контекст/триггер эмоции
-        
+
     Returns:
         dict: Статус сохранения
     """
+    from config import MAX_EMOTIONAL_MEMORIES_PER_USER
+
     # Валидация intensity
     if not isinstance(intensity, int) or not (1 <= intensity <= 10):
         logging.warning(f"Invalid intensity {intensity} for user {user_id}, clamping to range 1-10")
         intensity = max(1, min(10, int(intensity)))
-    
+
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                # Проверяем текущее количество эмоциональных воспоминаний
+                count_result = await session.execute(
+                    select(func.count(LongTermMemory.id))
+                    .where(
+                        LongTermMemory.user_id == user_id,
+                        LongTermMemory.category == "emotion"
+                    )
+                )
+                current_count = count_result.scalar()
+
+                # Если превышен лимит, удаляем самые старые с низкой интенсивностью
+                if current_count >= MAX_EMOTIONAL_MEMORIES_PER_USER:
+                    # Удаляем самые старые воспоминания с минимальной интенсивностью
+                    memories_to_delete = current_count - MAX_EMOTIONAL_MEMORIES_PER_USER + 1
+
+                    # Находим IDs воспоминаний для удаления (сортируем по intensity ASC, затем по timestamp ASC)
+                    old_memories = await session.execute(
+                        select(LongTermMemory.id)
+                        .where(
+                            LongTermMemory.user_id == user_id,
+                            LongTermMemory.category == "emotion"
+                        )
+                        .order_by(
+                            asc(LongTermMemory.intensity),
+                            asc(LongTermMemory.timestamp)
+                        )
+                        .limit(memories_to_delete)
+                    )
+                    ids_to_delete = [row[0] for row in old_memories.all()]
+
+                    if ids_to_delete:
+                        await session.execute(
+                            delete(LongTermMemory).where(LongTermMemory.id.in_(ids_to_delete))
+                        )
+                        logging.info(
+                            f"Удалено {len(ids_to_delete)} старых эмоциональных воспоминаний "
+                            f"для user {user_id} (превышен лимит {MAX_EMOTIONAL_MEMORIES_PER_USER})"
+                        )
+
+    except Exception as e:
+        logging.error(f"Ошибка при проверке лимита эмоциональных воспоминаний для user {user_id}: {e}")
+
     # Формируем факт в виде: "Emotion: happy (context: получил хорошие новости)"
     fact = f"Emotion: {emotion} (context: {context})"
-    
+
     return await save_long_term_memory(user_id, fact, category="emotion", intensity=intensity)
 
 

@@ -109,8 +109,8 @@ async def warmup_cache_job():
 
 # --- Проактивные сообщения (только для Premium) ---
 
-# Лимиты проактивных сообщений (по user_id для отслеживания)
-_proactive_message_tracker = {}
+# NOTE: Используем Redis для thread-safe отслеживания лимитов проактивных сообщений
+# вместо in-memory dict для предотвращения race conditions
 
 # Промпты для AI генерации проактивных сообщений
 PROACTIVE_PROMPTS = {
@@ -156,7 +156,7 @@ PROACTIVE_PROMPTS = {
 }
 
 
-def _should_send_proactive(profile, last_message_time: datetime | None) -> tuple[bool, str | None]:
+async def _should_send_proactive(profile, last_message_time: datetime | None) -> tuple[bool, str | None]:
     """
     Определяет, нужно ли отправить проактивное сообщение.
     ТОЛЬКО ДЛЯ PREMIUM ПОЛЬЗОВАТЕЛЕЙ!
@@ -187,9 +187,22 @@ def _should_send_proactive(profile, last_message_time: datetime | None) -> tuple
             return False, None
         
         # Проверяем лимит сообщений в день (максимум 2 проактивных в день)
-        today_key = f"{profile.user_id}_{user_now.date()}"
-        proactive_count_today = _proactive_message_tracker.get(today_key, 0)
-        
+        # Используем Redis для thread-safe счетчика
+        from config import REDIS_CLIENT
+        today_key = f"proactive_count:{profile.user_id}:{user_now.date()}"
+
+        try:
+            if REDIS_CLIENT:
+                proactive_count_today = await REDIS_CLIENT.get(today_key)
+                proactive_count_today = int(proactive_count_today) if proactive_count_today else 0
+            else:
+                # Fallback если Redis недоступен (не критично для проактивных сообщений)
+                logger.warning("Redis недоступен для проверки лимита проактивных сообщений")
+                proactive_count_today = 0
+        except Exception as e:
+            logger.error(f"Ошибка при проверке счетчика проактивных сообщений: {e}")
+            proactive_count_today = 0
+
         if proactive_count_today >= 2:
             return False, None
         
@@ -345,14 +358,23 @@ async def _send_proactive_message(user_id: int, message_type: str):
         
         # Отправляем сообщение
         await bot.send_message(chat_id=user_id, text=message_text)
-        
-        # Обновляем счетчик
+
+        # Обновляем счетчик в Redis (thread-safe, атомарная операция)
+        from config import REDIS_CLIENT
         user_tz = pytz.UTC
-        today_key = f"{user_id}_{datetime.now(user_tz).date()}"
-        _proactive_message_tracker[today_key] = _proactive_message_tracker.get(today_key, 0) + 1
-        
+        today_key = f"proactive_count:{user_id}:{datetime.now(user_tz).date()}"
+
+        try:
+            if REDIS_CLIENT:
+                # INCR атомарен - безопасен для concurrent операций
+                await REDIS_CLIENT.incr(today_key)
+                # Устанавливаем TTL 48 часов (чтобы ключи автоматически удалялись)
+                await REDIS_CLIENT.expire(today_key, 48 * 3600)
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении счетчика проактивных сообщений: {e}")
+
         logger.info(f"✅ Проактивное AI сообщение отправлено user {user_id} (тип: {message_type}): '{message_text[:50]}...'")
-        
+
         await bot.session.close()
         
     except Exception as e:
@@ -382,7 +404,7 @@ async def proactive_messages_job():
                 last_message_time = await get_last_message_time(profile.user_id)
                 
                 # Проверяем, нужно ли отправить сообщение
-                should_send, message_type = _should_send_proactive(profile, last_message_time)
+                should_send, message_type = await _should_send_proactive(profile, last_message_time)
                 
                 if should_send and message_type:
                     await _send_proactive_message(profile.user_id, message_type)

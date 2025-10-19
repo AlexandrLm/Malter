@@ -208,6 +208,29 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
         raise credentials_exception
     return user_id
 
+async def verify_admin(user_id: int = Depends(verify_token)) -> int:
+    """
+    Проверяет, что пользователь является администратором.
+
+    Args:
+        user_id: ID пользователя из JWT токена
+
+    Returns:
+        user_id если пользователь admin
+
+    Raises:
+        HTTPException: 403 если пользователь не admin
+    """
+    from config import ADMIN_USER_IDS
+
+    if user_id not in ADMIN_USER_IDS:
+        logging.warning(f"Unauthorized admin access attempt from user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    return user_id
+
 # --- Метрики Prometheus ---
 from starlette_prometheus import PrometheusMiddleware, metrics
 app.add_middleware(PrometheusMiddleware)
@@ -534,7 +557,7 @@ async def test_tts(
 @limiter.limit("10/minute")
 async def db_metrics_handler(
     request: Request,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает метрики производительности БД:
@@ -559,7 +582,7 @@ async def db_metrics_handler(
 @limiter.limit("10/minute")
 async def cache_stats_handler(
     request: Request,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статистику кэша:
@@ -585,7 +608,7 @@ async def cache_stats_handler(
 @limiter.limit("10/minute")
 async def scheduler_status_handler(
     request: Request,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статус scheduler и список запланированных задач.
@@ -608,7 +631,7 @@ async def scheduler_status_handler(
 async def cleanup_chat_history_handler(
     request: Request,
     days_to_keep: int = 30,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Удаляет историю чата старше указанного количества дней.
@@ -684,7 +707,7 @@ async def analytics_users_handler(
 async def analytics_messages_handler(
     request: Request,
     days: int = 7,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статистику сообщений:
@@ -764,7 +787,7 @@ async def analytics_features_handler(
 async def analytics_cohort_handler(
     request: Request,
     days: int = 30,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает когортный анализ:
@@ -842,7 +865,7 @@ async def analytics_activity_handler(
 async def analytics_tools_handler(
     request: Request,
     days: int = 7,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статистику использования AI Tools:
