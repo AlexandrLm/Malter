@@ -52,7 +52,10 @@ TTS_VOICE_NAME = os.getenv("TTS_VOICE_NAME", "leda")
 
 SUMMARY_THRESHOLD = 26 # Количество сообщений для запуска суммирования
 MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, которые будут взяты для создания сводки (и последующего удаления)
-CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
+
+# Лимиты истории чата для разных типов пользователей
+CHAT_HISTORY_LIMIT_FREE = 5  # FREE пользователи: меньше истории = меньше токенов = меньше затрат
+CHAT_HISTORY_LIMIT_PREMIUM = 12  # PREMIUM пользователи: больше контекста для лучшего общения
 
 # Limits для памяти
 MAX_EMOTIONAL_MEMORIES_PER_USER = int(os.getenv('MAX_EMOTIONAL_MEMORIES_PER_USER', 100))  # Максимум эмоциональных воспоминаний на пользователя

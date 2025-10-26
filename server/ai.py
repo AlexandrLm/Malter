@@ -18,8 +18,9 @@ from prompts import BASE_SYSTEM_PROMPT, PREMIUM_SYSTEM_PROMPT
 from server.database import check_subscription_expiry
 from personality_prompts import PERSONALITIES
 from config import (
-    CHAT_HISTORY_LIMIT, 
-    MODEL_NAME, 
+    CHAT_HISTORY_LIMIT_FREE,
+    CHAT_HISTORY_LIMIT_PREMIUM,
+    MODEL_NAME,
     GEMINI_CLIENT,
     MAX_AI_ITERATIONS,
     AI_THINKING_BUDGET,
@@ -97,10 +98,12 @@ class AIResponseGenerator:
         await save_chat_message(self.user_id, 'user', self.formatted_message, timestamp=self.timestamp)
         
         image_part = await process_image_data(self.image_data, self.user_id)
+        is_premium = self.profile.is_premium_active
         self.history = await prepare_chat_history(
-            self.unsummarized_messages, 
-            self.formatted_message, 
-            image_part
+            self.unsummarized_messages,
+            self.formatted_message,
+            image_part,
+            is_premium
         )
         
         self.tools = genai_types.Tool(
@@ -521,24 +524,27 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
         return None
 
 
-async def prepare_chat_history(unsummarized_messages: list[ChatHistory], formatted_message: str, image_part: genai_types.Part | None) -> list[genai_types.Content]:
+async def prepare_chat_history(unsummarized_messages: list[ChatHistory], formatted_message: str, image_part: genai_types.Part | None, is_premium: bool = False) -> list[genai_types.Content]:
     """
     Подготавливает историю чата для Gemini API, включая ограничение по лимиту и добавление текущего сообщения пользователя.
-    
+
     Args:
         unsummarized_messages (list[ChatHistory]): Несуммаризированные сообщения из БД.
         formatted_message (str): Отформатированное сообщение пользователя.
         image_part (genai_types.Part | None): Часть с изображением, если есть.
-        
+        is_premium (bool): Является ли пользователь premium (для разных лимитов истории).
+
     Returns:
         list[genai_types.Content]: Готовая история чата.
     """
-    history = create_history_from_messages(unsummarized_messages[-CHAT_HISTORY_LIMIT:])
-    
+    # Используем разные лимиты истории для FREE и PREMIUM пользователей
+    history_limit = CHAT_HISTORY_LIMIT_PREMIUM if is_premium else CHAT_HISTORY_LIMIT_FREE
+    history = create_history_from_messages(unsummarized_messages[-history_limit:])
+
     user_parts = [genai_types.Part.from_text(text=formatted_message)]
     if image_part:
         user_parts.insert(0, image_part)
-    
+
     history.append(genai_types.Content(role='user', parts=user_parts))
     return history
 

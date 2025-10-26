@@ -18,8 +18,7 @@ from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 from utils.retry_configs import db_retry, redis_retry
 from utils.db_monitoring import setup_query_monitoring, get_query_metrics
 from config import (
-    DATABASE_URL, 
-    CHAT_HISTORY_LIMIT, 
+    DATABASE_URL,
     REDIS_CLIENT,
     CACHE_TTL_SECONDS,
     REDIS_RETRY_ATTEMPTS,
