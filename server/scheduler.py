@@ -282,9 +282,9 @@ async def _generate_proactive_message(user_id: int, message_type: str) -> str | 
         
         latest_summary = await get_latest_summary(user_id)
         unsummarized_messages = await get_unsummarized_messages(user_id, limit=5)
-        
+
         # Строим СТАНДАРТНЫЙ system instruction (как для обычного чата)
-        system_instruction = build_system_instruction(profile, latest_summary)
+        system_instruction = await build_system_instruction(profile, latest_summary)
         
         # Создаём историю последних сообщений (для контекста)
         history = create_history_from_messages(unsummarized_messages[-5:]) if unsummarized_messages else []

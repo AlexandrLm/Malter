@@ -22,7 +22,7 @@ import config
 # JWT imports
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, status, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -110,9 +110,14 @@ def strip_voice_markers(text: str) -> str:
     
     return text.strip()
 
-async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
+async def handle_tts_generation(user_id: int, response_text: str) -> dict:
     """
     Handles TTS generation for premium users if [VOICE] marker is present.
+
+    Returns:
+        dict: Dictionary containing:
+            - 'text': The processed text (with or without voice markers)
+            - 'voice_data': Base64-encoded voice message or None
     """
     await check_subscription_expiry(user_id)
     profile = await get_profile(user_id)
@@ -125,14 +130,17 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
         if not is_premium:
             # Strip [VOICE] and intonation for non-premium and skip TTS
             clean_text = strip_voice_markers(response_text)
-            return clean_text, None
+            return {
+                "text": clean_text,
+                "voice_data": None
+            }
         else:
             # Proceed with TTS for premium
             text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
-            
+
             # Создаем файловый объект в памяти вместо реального файла
             voice_file_object = io.BytesIO()
-            
+
             # Замеряем время генерации голосового сообщения
             tts_start_time = time.time()
             success = await create_telegram_voice_message(text_to_speak, voice_file_object)
@@ -145,30 +153,39 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
                 import base64
                 voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
                 VOICE_MESSAGES_GENERATED.inc()
-                return text_to_speak, voice_message_data
+                return {
+                    "text": text_to_speak,
+                    "voice_data": voice_message_data
+                }
             else:
                 # Если генерация не удалась (например, квота закончилась), отправляем текст без голоса и без интонации
                 logging.warning(f"TTS generation failed for user {user_id}, sending text only")
                 clean_text = strip_voice_markers(response_text)
-                return clean_text, None
+                return {
+                    "text": clean_text,
+                    "voice_data": None
+                }
 
-    return response_text, None
+    return {
+        "text": response_text,
+        "voice_data": None
+    }
 
 def assemble_chat_response(response_text: str, voice_data: str | None, image_base64: str | None) -> ChatResponse:
     """
     Assembles the final ChatResponse object.
-    """
-    if voice_data is None:
-        # No voice, use original text
-        pass
-    else:
-        # Voice generated, text is already stripped
-        response_text = voice_data[0] if isinstance(voice_data, tuple) else response_text
-        voice_message_data = voice_data[1] if isinstance(voice_data, tuple) else voice_data
 
+    Args:
+        response_text: The main text response
+        voice_data: Base64-encoded voice message or None
+        image_base64: Base64-encoded image or None
+
+    Returns:
+        ChatResponse: Complete response with text, voice, and optional image
+    """
     return ChatResponse(
         response_text=response_text,
-        voice_message=voice_message_data,
+        voice_message=voice_data,
         image_base64=image_base64
     )
 
@@ -182,9 +199,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES = config.JWT_EXPIRE_MINUTES
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -427,10 +444,12 @@ async def chat_handler(
     image_base64 = ai_response.get('image_base64')
 
     # Handle TTS if premium
-    voice_message_data = await handle_tts_generation(user_id, response_text)
+    tts_result = await handle_tts_generation(user_id, response_text)
+    processed_text = tts_result["text"]
+    voice_message_data = tts_result["voice_data"]
 
     CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
-    return assemble_chat_response(response_text, voice_message_data, image_base64)
+    return assemble_chat_response(processed_text, voice_message_data, image_base64)
 
 
 @app.get("/profile/{user_id}", response_model=ProfileData | None, summary="Получение профиля пользователя", description="Возвращает данные профиля пользователя по его ID.")

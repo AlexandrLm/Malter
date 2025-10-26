@@ -932,30 +932,56 @@ async def check_message_limit(user_id: int) -> dict:
 async def check_subscription_expiry(user_id: int) -> bool:
     """
     Проверяет и обновляет статус подписки при истечении.
-    
+    Использует row-level lock для предотвращения race conditions.
+
     Args:
         user_id (int): Уникальный идентификатор пользователя.
-        
+
     Returns:
         bool: True если подписка активна, False если истекла или отсутствует.
     """
-    profile = await get_profile(user_id)
-    if not profile:
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                # Используем row-level lock для атомарности
+                result = await session.execute(
+                    select(UserProfile)
+                    .where(UserProfile.user_id == user_id)
+                    .with_for_update()
+                )
+                profile = result.scalar_one_or_none()
+
+                if not profile:
+                    return False
+
+                # Проверяем истечение подписки
+                if profile.subscription_plan == 'premium' and profile.subscription_expires:
+                    # Правильно обрабатываем timezone
+                    if profile.subscription_expires.tzinfo is None:
+                        expires_aware = profile.subscription_expires.replace(tzinfo=timezone.utc)
+                    else:
+                        expires_aware = profile.subscription_expires
+
+                    if expires_aware < datetime.now(timezone.utc):
+                        # Подписка истекла, переводим на бесплатный план
+                        profile.subscription_plan = 'free'
+                        profile.subscription_expires = None
+                        await session.commit()
+
+                        # Инвалидируем кэш после успешного commit
+                        cache_key = get_profile_cache_key(user_id)
+                        await _safe_redis_delete(cache_key)
+
+                        logging.debug(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
+                        return False
+
+                return profile.subscription_plan == 'premium'
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при проверке подписки для пользователя {user_id}: {e}", exc_info=True)
         return False
-    
-    if (profile.subscription_plan == 'premium' and 
-        profile.subscription_expires and 
-        profile.subscription_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)):
-        
-        # Подписка истекла, переводим на бесплатный план
-        await create_or_update_profile(user_id, {
-            "subscription_plan": "free",
-            "subscription_expires": None
-        })
-        logging.debug(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при проверке подписки для пользователя {user_id}: {e}", exc_info=True)
         return False
-    
-    return profile.subscription_plan == 'premium'
 
 async def cleanup_old_chat_history(days_to_keep: int = 30) -> int:
     """
