@@ -1,0 +1,21 @@
+INFO:bot.services.api_client:API request end - user_id: 387393405, method: POST, endpoint: /chat, latency: 1.64s
+
+INFO:aiogram.event:Update id=729112162 is handled. Duration 12417 ms by bot id=7624247836
+
+INFO:bot.services.image_processor:Image processed successfully for user 387393405: 150800 bytes, (768, 1024) dimensions
+
+INFO:httpx:HTTP Request: POST http://api:8000/auth⁠ "HTTP/1.1 200 OK"
+
+INFO:bot.services.api_client:API request start - user_id: 387393405, method: POST, endpoint: /chat
+api      
+
+INFO:root:Получено сообщение от пользователя 387393405 в 2025-10-26 10:41:55+00:00: ''
+
+INFO:google_genai.models:AFC is enabled with max remote calls: 10.
+bot      
+
+INFO:httpx:HTTP Request: POST http://api:8000/chat⁠ "HTTP/1.1 200 OK"
+
+INFO:bot.services.api_client:API request end - user_id: 387393405, method: POST, endpoint: /chat, latency: 5.86s
+
+INFO:aiogram.event:Update id=729112163 is handled. Duration 21810 ms by bot id=7624247836
