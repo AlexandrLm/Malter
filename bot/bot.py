@@ -14,6 +14,7 @@ from redis.asyncio.client import Redis
 
 from config import HTTPX_CONNECT_TIMEOUT, HTTPX_TIMEOUT, REDIS_DB, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN
 from bot.handlers import router
+from bot.handlers.payments import set_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,9 @@ async def main() -> None:
         # Инициализируем хранилище Redis
         redis = Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
         storage = RedisStorage(redis=redis)
+
+        # Передаем Redis client в payment handler для rate limiting
+        set_redis_client(redis)
 
         # Создаем диспетчер и передаем ему хранилище
         dp = Dispatcher(storage=storage)

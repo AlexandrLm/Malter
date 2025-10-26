@@ -366,10 +366,11 @@ async def _send_proactive_message(user_id: int, message_type: str):
 
         try:
             if REDIS_CLIENT:
-                # INCR атомарен - безопасен для concurrent операций
-                await REDIS_CLIENT.incr(today_key)
-                # Устанавливаем TTL 48 часов (чтобы ключи автоматически удалялись)
-                await REDIS_CLIENT.expire(today_key, 48 * 3600)
+                # Используем pipeline для атомарности операций incr + expire
+                pipe = REDIS_CLIENT.pipeline()
+                pipe.incr(today_key)
+                pipe.expire(today_key, 48 * 3600)
+                await pipe.execute()
         except Exception as e:
             logger.error(f"Ошибка при обновлении счетчика проактивных сообщений: {e}")
 

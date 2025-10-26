@@ -1008,7 +1008,12 @@ async def activate_premium_subscription(user_id: int, duration_days: int = 30, c
     if charge_id and len(charge_id) > 255:
         logging.error(f"charge_id слишком длинный для user {user_id}: {len(charge_id)} символов (макс 255)")
         return False
-    
+
+    # SECURITY: Валидация duration_days
+    if not isinstance(duration_days, int) or duration_days < 1 or duration_days > 3650:
+        logging.error(f"Недопустимое значение duration_days для user {user_id}: {duration_days} (допустимо: 1-3650 дней)")
+        return False
+
     try:
         profile = await get_profile(user_id)
         if not profile:
