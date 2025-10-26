@@ -662,16 +662,23 @@ async def get_latest_summary(user_id: int) -> ChatSummary | None:
         logging.error(f"Ошибка БД при получении сводки для пользователя {user_id}: {e}", exc_info=True)
         return None
 
-async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
+async def get_unsummarized_messages(user_id: int, limit: int | None = None) -> list[ChatHistory]:
     """
     Извлекает все сообщения пользователя, которые еще не были включены в сводку.
+
+    Args:
+        user_id: ID пользователя
+        limit: Максимальное количество сообщений (необязательно)
+
+    Returns:
+        list[ChatHistory]: Список несуммаризированных сообщений
     """
     try:
         latest_summary = await get_latest_summary(user_id)
         last_message_id = latest_summary.last_message_id if latest_summary else 0
 
         async with async_session_factory() as session:
-            result = await session.execute(
+            query = (
                 select(ChatHistory)
                 .where(
                     ChatHistory.user_id == user_id,
@@ -679,6 +686,12 @@ async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
                 )
                 .order_by(ChatHistory.timestamp.asc())
             )
+
+            # Применяем лимит если указан
+            if limit is not None:
+                query = query.limit(limit)
+
+            result = await session.execute(query)
             messages = result.scalars().all()
             return messages
     except SQLAlchemyError as e:
