@@ -334,28 +334,28 @@ async def _generate_proactive_message(user_id: int, message_type: str) -> str | 
 async def _send_proactive_message(user_id: int, message_type: str):
     """
     Генерирует и отправляет проактивное сообщение пользователю.
-    
+
     Args:
         user_id: ID пользователя
         message_type: Тип сообщения (morning, evening, etc.)
     """
+    from aiogram import Bot
+    from config import TELEGRAM_TOKEN
+
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не настроен")
+        return
+
+    # Генерируем сообщение с помощью AI
+    message_text = await _generate_proactive_message(user_id, message_type)
+
+    if not message_text:
+        logger.warning(f"Не удалось сгенерировать сообщение для user {user_id}")
+        return
+
+    bot = Bot(token=TELEGRAM_TOKEN)
+
     try:
-        from aiogram import Bot
-        from config import TELEGRAM_TOKEN
-        
-        if not TELEGRAM_TOKEN:
-            logger.error("TELEGRAM_TOKEN не настроен")
-            return
-        
-        # Генерируем сообщение с помощью AI
-        message_text = await _generate_proactive_message(user_id, message_type)
-        
-        if not message_text:
-            logger.warning(f"Не удалось сгенерировать сообщение для user {user_id}")
-            return
-        
-        bot = Bot(token=TELEGRAM_TOKEN)
-        
         # Отправляем сообщение
         await bot.send_message(chat_id=user_id, text=message_text)
 
@@ -375,10 +375,11 @@ async def _send_proactive_message(user_id: int, message_type: str):
 
         logger.info(f"✅ Проактивное AI сообщение отправлено user {user_id} (тип: {message_type}): '{message_text[:50]}...'")
 
-        await bot.session.close()
-        
     except Exception as e:
         logger.error(f"❌ Ошибка отправки проактивного сообщения user {user_id}: {e}", exc_info=True)
+    finally:
+        # Гарантируем закрытие bot session в любом случае
+        await bot.session.close()
 
 
 async def proactive_messages_job():

@@ -17,6 +17,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 from utils.retry_configs import db_retry, redis_retry
 from utils.db_monitoring import setup_query_monitoring, get_query_metrics
+from utils.circuit_breaker import CircuitBreaker
 from config import (
     DATABASE_URL,
     REDIS_CLIENT,
@@ -49,108 +50,71 @@ def get_chat_messages_cache_key(user_id: int) -> str:
     return f"chat_messages:{user_id}"
 
 # --- Circuit Breaker для Redis ---
-class RedisCircuitBreaker:
-    """
-    Circuit Breaker паттерн для защиты от cascade failures при проблемах с Redis.
-    
-    States:
-    - CLOSED: Нормальная работа, все запросы идут к Redis
-    - OPEN: Redis недоступен, запросы сразу возвращают None (30 секунд)
-    - HALF_OPEN: Пробуем восстановить соединение (1 тестовый запрос)
-    """
-    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.failure_count = 0
-        self.last_failure_time: datetime | None = None
-        self.is_open = False
-    
-    def record_success(self):
-        """Запрос успешен - сбрасываем счетчик."""
-        self.failure_count = 0
-        self.is_open = False
-    
-    def record_failure(self):
-        """Запрос провален - увеличиваем счетчик."""
-        self.failure_count += 1
-        self.last_failure_time = datetime.now()
-        
-        if self.failure_count >= self.failure_threshold:
-            self.is_open = True
-            logging.warning(f"Redis Circuit Breaker ОТКРЫТ после {self.failure_count} неудач")
-    
-    def can_attempt(self) -> bool:
-        """Проверяет, можно ли попытаться подключиться к Redis."""
-        if not self.is_open:
-            return True
-        
-        # Circuit breaker открыт - проверяем, прошло ли время восстановления
-        if self.last_failure_time:
-            time_since_failure = (datetime.now() - self.last_failure_time).total_seconds()
-            if time_since_failure >= self.recovery_timeout:
-                logging.info("Redis Circuit Breaker пробует восстановление (HALF-OPEN)")
-                self.is_open = False  # Переходим в HALF-OPEN
-                self.failure_count = self.failure_threshold - 1  # Еще 1 неудача = снова OPEN
-                return True
-        
-        return False
-    
-    def get_state(self) -> str:
-        """Возвращает текущее состояние circuit breaker."""
-        if not self.is_open:
-            return "CLOSED" if self.failure_count == 0 else "HALF_OPEN"
-        return "OPEN"
+# Используем правильную реализацию из utils/circuit_breaker.py
+redis_circuit_breaker = CircuitBreaker(
+    name="Redis",
+    failure_threshold=3,
+    recovery_timeout=30,
+    expected_exception=RedisError,
+    success_threshold=2
+)
 
-redis_circuit_breaker = RedisCircuitBreaker()
-
-@redis_retry
 async def _safe_redis_get(key: str) -> str | None:
     """
     Безопасное чтение из Redis с retry механизмом и Circuit Breaker.
     При неудаче возвращает None вместо exception.
     """
-    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
+    if not REDIS_CLIENT:
         return None
+
+    @redis_circuit_breaker.call
+    @redis_retry
+    async def _do_get():
+        return await REDIS_CLIENT.get(key)
+
     try:
-        result = await REDIS_CLIENT.get(key)
-        redis_circuit_breaker.record_success()
-        return result
+        return await _do_get()
     except Exception as e:
-        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis GET failed for key {key}: {e}")
         return None
 
-@redis_retry
 async def _safe_redis_set(key: str, value: str, ex: int) -> bool:
     """
     Безопасная запись в Redis с retry механизмом и Circuit Breaker.
     Возвращает True при успехе, False при неудаче.
     """
-    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
+    if not REDIS_CLIENT:
         return False
-    try:
+
+    @redis_circuit_breaker.call
+    @redis_retry
+    async def _do_set():
         await REDIS_CLIENT.set(key, value, ex=ex)
-        redis_circuit_breaker.record_success()
         return True
+
+    try:
+        return await _do_set()
     except Exception as e:
-        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis SET failed for key {key}: {e}")
         return False
 
-@redis_retry
 async def _safe_redis_delete(key: str) -> bool:
     """
     Безопасное удаление из Redis с retry механизмом и Circuit Breaker.
     Возвращает True при успехе, False при неудаче.
     """
-    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
+    if not REDIS_CLIENT:
         return False
-    try:
+
+    @redis_circuit_breaker.call
+    @redis_retry
+    async def _do_delete():
         await REDIS_CLIENT.delete(key)
-        redis_circuit_breaker.record_success()
         return True
+
+    try:
+        return await _do_delete()
     except Exception as e:
-        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis DELETE failed for key {key}: {e}")
         return False
 
@@ -221,18 +185,25 @@ async def get_profile(user_id: int) -> UserProfile | None:
 async def create_or_update_profile(user_id: int, data: dict):
     """
     Атомарно создает или обновляет профиль и инвалидирует кэш.
-    
+
     Args:
         user_id (int): Уникальный идентификатор пользователя.
         data (dict): Данные профиля для создания или обновления.
     """
+    # Инвалидируем кэш ПЕРЕД обновлением БД для предотвращения race condition
+    # Это гарантирует, что concurrent reads не получат stale данные
+    cache_key = get_profile_cache_key(user_id)
+    deleted = await _safe_redis_delete(cache_key)
+    if not deleted:
+        logging.warning(f"Не удалось инвалидировать кэш профиля для user {user_id}. Данные могут быть устаревшими.")
+
     try:
         # Шифруем поле name, если оно есть, но оставляем ключ как 'name' для соответствия колонке БД
         db_data = data.copy()
         if 'name' in db_data:
             from utils.encryption import encrypt_field
             db_data['name'] = encrypt_field(db_data['name'])
-        
+
         async with async_session_factory() as session:
             # Используем Core-style insert через __table__ чтобы избежать проблем с @property
             stmt = insert(UserProfile.__table__).values(user_id=user_id, **db_data)
@@ -242,12 +213,6 @@ async def create_or_update_profile(user_id: int, data: dict):
     except Exception as e:
         logging.error(f"Ошибка при создании/обновлении профиля в БД для пользователя {user_id}: {e}")
         raise
-
-    # Инвалидируем кэш (критично для консистентности данных)
-    cache_key = get_profile_cache_key(user_id)
-    deleted = await _safe_redis_delete(cache_key)
-    if not deleted:
-        logging.warning(f"Не удалось инвалидировать кэш профиля для user {user_id}. Данные могут быть устаревшими.")
 
 async def delete_profile(user_id: int):
     """Удаляет профиль и инвалидирует кэш.

@@ -1,11 +1,11 @@
 # Bug Report: EvolveAI Backend
 
 **Date:** 2025-10-26
-**Status:** Critical fixes completed ✅
+**Status:** Critical & High-priority fixes in progress 🔥
 **Critical Issues Remaining:** 0 (5 fixed)
-**High Priority:** 8
+**High Priority Remaining:** 3 (5 fixed)
 **Medium Priority:** 11
-**Total Issues Remaining:** 19
+**Total Issues Remaining:** 14
 
 ---
 
@@ -13,7 +13,7 @@
 
 Проведен глубокий анализ всего проекта на наличие ошибок и потенциальных проблем. **Отличная новость:** Все 5 критических багов успешно исправлены! **Текущее состояние:** Осталось 8 high-priority и 11 medium-priority проблем.
 
-### Общая оценка стабильности: **8.0/10** ⬆️ (было 6.5/10)
+### Общая оценка стабильности: **8.5/10** ⬆️ (было 6.5/10)
 
 **Что работает хорошо:**
 - ✅ Логирование ошибок настроено правильно
@@ -61,137 +61,41 @@
 **Файл:** [bot/handlers/messages.py:51-88](bot/handlers/messages.py#L51-L88)
 **Исправление:** Добавлен comprehensive error handling для JSON parsing
 
+### ✅ Bug #6: SQL Injection Risk in ILIKE Fallback - FIXED
+
+**Файл:** [server/database.py:565](server/database.py#L565)
+**Исправление:** Добавлено экранирование ILIKE wildcard символов (`%`, `_`, `\`)
+
+### ✅ Bug #7: Redis Circuit Breaker Never Recovers - FIXED
+
+**Файл:** [server/database.py:54-119](server/database.py#L54-L119)
+**Исправление:** Заменена custom реализация на правильный `CircuitBreaker` из `utils/circuit_breaker.py` с полноценными состояниями CLOSED/HALF_OPEN/OPEN
+
+### ✅ Bug #8: Missing Null Check Before Database Insert - ALREADY FIXED
+
+**Файл:** [server/database.py:595-600](server/database.py#L595-L600)
+**Статус:** Этот баг уже был исправлен в коде. Проверка `if timestamp is not None:` присутствует
+
+### ✅ Bug #9: Profile Cache Invalidation Race Condition - FIXED
+
+**Файл:** [server/database.py:193-198](server/database.py#L193-L198)
+**Исправление:** Инвалидация кэша перемещена ПЕРЕД обновлением БД для предотвращения race condition
+
+### ✅ Bug #10: Image Processing Memory Leak - FIXED
+
+**Файл:** [bot/services/image_processor.py:40-138](bot/services/image_processor.py#L40-L138)
+**Исправление:** Добавлены context managers для PIL Image и finally блоки для явного закрытия всех BytesIO объектов
+
+### ✅ Bug #11: Bot Session Connection Leak - FIXED
+
+**Файл:** [server/scheduler.py:358-382](server/scheduler.py#L358-L382)
+**Исправление:** Добавлен finally блок для гарантированного закрытия bot.session в любых случаях
+
 ---
 
 ## HIGH-PRIORITY БАГИ
 
-### 🟠 Bug #6: SQL Injection Risk in ILIKE Fallback
-**Файл:** [server/database.py:567](server/database.py#L567)
-**Severity:** HIGH
-**Вероятность проявления:** LOW
-
-**Проблема:**
-```python
-# Line 567
-LongTermMemory.fact.ilike(f"%{sanitized_query}%")
-```
-
-**Последствия:**
-- ILIKE использует % и _ как wildcard символы
-- Если sanitized_query содержит % или _, поиск работает некорректно
-- Потенциальная SQL injection через специальные символы
-
-**Как исправить:**
-```python
-# Escape ILIKE wildcards
-escaped_query = sanitized_query.replace('%', r'\%').replace('_', r'\_')
-LongTermMemory.fact.ilike(f"%{escaped_query}%")
-```
-
----
-
-### 🟠 Bug #7: Redis Circuit Breaker Never Recovers
-**Файл:** [server/database.py:82-96](server/database.py#L82-L96)
-**Severity:** HIGH
-**Вероятность проявления:** HIGH
-
-**Проблема:**
-```python
-def can_attempt(self) -> bool:
-    if not self.is_open:
-        return True
-
-    if self.last_failure_time:
-        time_since_failure = (datetime.now() - self.last_failure_time).total_seconds()
-        if time_since_failure >= self.recovery_timeout:
-            self.is_open = False  # ❌ Переходит в closed сразу
-            self.failure_count = self.failure_threshold - 1  # ❌ Плохая логика
-            return True
-
-    return False
-```
-
-**Последствия:**
-- Circuit breaker не имеет состояния HALF_OPEN
-- После восстановления сразу переходит в CLOSED
-- Одна ошибка сразу открывает circuit снова
-- Redis может стать навсегда недоступным
-
-**Как исправить:**
-```python
-# Использовать utils/circuit_breaker.py вместо custom реализации
-from utils.circuit_breaker import CircuitBreaker
-
-redis_circuit_breaker = CircuitBreaker(
-    name="redis",
-    failure_threshold=5,
-    recovery_timeout=60,
-    expected_exception=Exception
-)
-```
-
----
-
-### 🟠 Bug #8: Missing Null Check Before Database Insert
-**Файл:** [server/database.py:631-632](server/database.py#L631-L632)
-**Severity:** HIGH
-**Вероятность проявления:** LOW
-
-**Проблема:**
-```python
-async def save_chat_message(user_id: int, role: str, content: str, timestamp: datetime | None = None):
-    # ...
-    naive_timestamp = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
-    # ❌ Если timestamp is None, вызов .replace() или .tzinfo крашнет
-```
-
-**Последствия:**
-- `AttributeError: 'NoneType' object has no attribute 'replace'`
-- Сообщение не сохраняется в БД
-- История чата теряется
-
-**Как исправить:**
-```python
-if timestamp is None:
-    naive_timestamp = datetime.now()
-else:
-    naive_timestamp = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
-```
-
----
-
-### 🟠 Bug #9: Profile Cache Invalidation Race Condition
-**Файл:** [server/database.py:246-250](server/database.py#L246-L250)
-**Severity:** HIGH
-**Вероятность проявления:** MEDIUM
-
-**Проблема:**
-```python
-await create_or_update_profile(user_id, update_data)  # <- Update DB
-# ⏱️ Между этими строками concurrent read может получить stale cache
-cache_key = get_profile_cache_key(user_id)
-deleted = await _safe_redis_delete(cache_key)  # <- Delete cache AFTER
-```
-
-**Последствия:**
-- Пользователи видят устаревшие данные профиля после обновления
-- Premium подписка может не активироваться сразу
-- Изменения имени/настроек не видны
-
-**Как исправить:**
-```python
-# Удалить кэш ПЕРЕД обновлением БД
-cache_key = get_profile_cache_key(user_id)
-await _safe_redis_delete(cache_key)
-await create_or_update_profile(user_id, update_data)
-```
-
----
-
-### 🟠 Bug #10: Image Processing Memory Leak
-**Файл:** [bot/services/image_processor.py:44-90](bot/services/image_processor.py#L44-L90)
-**Severity:** HIGH
-**Вероятность проявления:** HIGH (under load)
+### 🟠 Bug #12: Payment Rate Limiting Race Condition
 
 **Проблема:**
 ```python
