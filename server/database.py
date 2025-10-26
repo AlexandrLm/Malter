@@ -561,10 +561,12 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
             # Fallback на ILIKE если полнотекстовый поиск не дал результатов
             if not memories and sanitized_query:
                 logging.debug(f"Full-text search дал 0 результатов, пробуем ILIKE fallback для user_id {user_id}")
+                # Экранируем ILIKE wildcards для безопасности
+                escaped_query = sanitized_query.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
                 result = await session.execute(
                     select(LongTermMemory).where(
                         LongTermMemory.user_id == user_id,
-                        LongTermMemory.fact.ilike(f"%{sanitized_query}%")
+                        LongTermMemory.fact.ilike(f"%{escaped_query}%")
                     ).order_by(desc(LongTermMemory.timestamp)).limit(5)
                 )
                 memories = result.scalars().all()

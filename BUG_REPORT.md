@@ -1,265 +1,65 @@
 # Bug Report: EvolveAI Backend
 
 **Date:** 2025-10-26
-**Status:** Comprehensive analysis completed
-**Critical Issues:** 5
+**Status:** Critical fixes completed ✅
+**Critical Issues Remaining:** 0 (5 fixed)
 **High Priority:** 8
 **Medium Priority:** 11
-**Total Issues Found:** 30+
+**Total Issues Remaining:** 19
 
 ---
 
 ## Executive Summary
 
-Проведен глубокий анализ всего проекта на наличие ошибок и потенциальных проблем. **Хорошая новость:** error.txt пустой, что говорит о том, что проект в целом стабилен. **Плохая новость:** найдено **30+ потенциальных багов**, включая 5 критических, которые могут привести к сбоям в production.
+Проведен глубокий анализ всего проекта на наличие ошибок и потенциальных проблем. **Отличная новость:** Все 5 критических багов успешно исправлены! **Текущее состояние:** Осталось 8 high-priority и 11 medium-priority проблем.
 
-### Общая оценка стабильности: **6.5/10**
+### Общая оценка стабильности: **8.0/10** ⬆️ (было 6.5/10)
 
 **Что работает хорошо:**
 - ✅ Логирование ошибок настроено правильно
 - ✅ Большинство exception обрабатываются корректно
 - ✅ Нет очевидных SQL injection уязвимостей (используется ORM)
 - ✅ Circuit breaker паттерн защищает от каскадных сбоев
+- ✅ **TTS return type исправлен**
+- ✅ **Async функции вызываются корректно**
+- ✅ **Subscription race condition устранён**
+- ✅ **DateTime timezone handling исправлен**
+- ✅ **JSON error handling добавлен**
 
-**Критические проблемы:**
-- ❌ 5 критических багов, которые могут вызвать runtime errors
-- ❌ 8 high-priority проблем с race conditions и утечками ресурсов
-- ❌ Нет тестов для проверки корректности работы
-- ❌ Некоторые async функции вызываются без await
+**Оставшиеся проблемы:**
 
----
-
-## КРИТИЧЕСКИЕ БАГИ (требуют немедленного исправления)
-
-### 🔴 Bug #1: TTS Return Value Type Mismatch
-**Файл:** [main.py:113-155, 430](main.py#L113-L155)
-**Severity:** CRITICAL
-**Вероятность проявления:** HIGH
-
-**Проблема:**
-```python
-# Line 113-155: Функция возвращает TUPLE
-async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
-    # ...
-    if has_voice_marker:
-        if not is_premium:
-            clean_text = strip_voice_markers(response_text)
-            return clean_text, None  # ❌ TUPLE, но type hint говорит str | None
-        else:
-            # ...
-            return text_to_speak, voice_message_data  # ❌ TUPLE
-
-    return response_text, None  # ❌ TUPLE
-
-# Line 430: Используется как single value
-voice_message_data = await handle_tts_generation(user_id, response_text)
-# НО! Функция возвращает (text, voice_data) - tuple!
-
-# Line 157-173: Пытается обработать это
-def assemble_chat_response(response_text: str, voice_data: str | None, image_base64: str | None):
-    if voice_data is None:
-        pass
-    else:
-        response_text = voice_data[0] if isinstance(voice_data, tuple) else response_text
-        voice_message_data = voice_data[1] if isinstance(voice_data, tuple) else voice_data
-    # Запутанная логика!
-```
-
-**Последствия:**
-- Голосовые сообщения могут не отправляться пользователям
-- Возможен `TypeError: cannot unpack non-iterable NoneType`
-- Непредсказуемое поведение для premium пользователей
-
-**Как исправить:**
-```python
-# Вариант 1: Вернуть dict
-async def handle_tts_generation(user_id: int, response_text: str) -> dict:
-    # ...
-    return {
-        "text": clean_text,
-        "voice_data": voice_message_data  # or None
-    }
-
-# Line 430
-result = await handle_tts_generation(user_id, response_text)
-response_text = result["text"]
-voice_message_data = result["voice_data"]
-```
-
-**Приоритет:** FIX IMMEDIATELY
+- 🟠 8 high-priority проблем с race conditions и утечками ресурсов
+- 🟡 11 medium-priority проблем
+- ⚠️ Нет тестов для проверки корректности работы
 
 ---
 
-### 🔴 Bug #2: Missing `await` for build_system_instruction()
+## ✅ КРИТИЧЕСКИЕ БАГИ - ИСПРАВЛЕНЫ (2025-10-26)
+
+### ✅ Bug #1: TTS Return Value Type Mismatch - FIXED
+
+**Файл:** [main.py:113-172](main.py#L113-L172)
+**Исправление:** Изменён return type на `dict`, упрощена логика `assemble_chat_response`
+
+### ✅ Bug #2: Missing `await` for build_system_instruction() - FIXED
+
 **Файл:** [server/scheduler.py:287](server/scheduler.py#L287)
-**Severity:** CRITICAL
-**Вероятность проявления:** HIGH (100% для proactive messages)
+**Исправление:** Добавлен `await` перед вызовом async функции
 
-**Проблема:**
-```python
-# Line 287 (scheduler.py)
-system_instruction = build_system_instruction(profile, latest_summary)
-# ❌ Отсутствует await!
+### ✅ Bug #3: Subscription Expiry Race Condition - FIXED
 
-# Но в server/ai.py:424 функция объявлена как async
-async def build_system_instruction(profile, latest_summary):
-    # ...
-```
+**Файл:** [server/database.py:932-984](server/database.py#L932-L984)
+**Исправление:** Использованы атомарные транзакции с row-level lock
 
-**Последствия:**
-- Проактивные сообщения **полностью сломаны**
-- `system_instruction` будет coroutine object, а не строка
-- Gemini API вернет ошибку: "system_instruction must be string"
-- Пользователи не получат проактивные сообщения
+### ✅ Bug #4: DateTime Timezone Handling Inconsistency - FIXED
 
-**Как исправить:**
-```python
-# Line 287
-system_instruction = await build_system_instruction(profile, latest_summary)
-```
+**Файл:** [main.py:202-204](main.py#L202-L204)
+**Исправление:** Заменён `datetime.utcnow()` на `datetime.now(timezone.utc)`
 
-**Приоритет:** FIX IMMEDIATELY
+### ✅ Bug #5: Bot Message Handler Missing JSON Error Handling - FIXED
 
----
-
-### 🔴 Bug #3: Subscription Expiry Race Condition
-**Файл:** [server/database.py:932-958](server/database.py#L932-L958)
-**Severity:** CRITICAL
-**Вероятность проявления:** MEDIUM (при concurrent requests)
-
-**Проблема:**
-```python
-async def check_subscription_expiry(user_id: int) -> bool:
-    profile = await get_profile(user_id)  # <- Query 1 (может быть из кэша)
-
-    if not profile or not profile.subscription_expires:
-        return False
-
-    if profile.subscription_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-        # Подписка истекла
-        await async_session_factory().execute(
-            update(UserProfile)
-            .where(UserProfile.user_id == user_id)
-            .values(subscription_plan='free', subscription_expires=None)
-        )  # <- Query 2 (без транзакции)
-
-        # Между Query 1 и Query 2 другой процесс может обновить профиль!
-```
-
-**Последствия:**
-- TOCTOU (Time-of-Check-Time-of-Use) уязвимость
-- При concurrent запросах возможно:
-  - Двойное обновление подписки
-  - Некорректное состояние в БД
-  - Пользователь получит premium после истечения
-
-**Как исправить:**
-```python
-async def check_subscription_expiry(user_id: int) -> bool:
-    async with async_session_factory() as session:
-        async with session.begin():  # ✅ Атомарная транзакция
-            result = await session.execute(
-                select(UserProfile)
-                .where(UserProfile.user_id == user_id)
-                .with_for_update()  # ✅ Row-level lock
-            )
-            profile = result.scalar_one_or_none()
-
-            if not profile or not profile.subscription_expires:
-                return False
-
-            if profile.subscription_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-                profile.subscription_plan = 'free'
-                profile.subscription_expires = None
-                await session.commit()
-                return True
-    return False
-```
-
-**Приоритет:** FIX BEFORE PRODUCTION
-
----
-
-### 🔴 Bug #4: DateTime Timezone Handling Inconsistency
-**Файл:** [main.py:185](main.py#L185), [server/database.py:948](server/database.py#L948)
-**Severity:** CRITICAL
-**Вероятность проявления:** MEDIUM
-
-**Проблема:**
-```python
-# main.py:185 - JWT token generation
-expire = datetime.utcnow() + timedelta(minutes=15)
-# ❌ datetime.utcnow() deprecated в Python 3.12+
-# ❌ Naive datetime (без timezone)
-
-# server/database.py:948
-profile.subscription_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)
-# ❌ .replace() не конвертирует timezone, просто заменяет атрибут
-# ❌ Если subscription_expires - naive datetime, сравнение некорректно
-```
-
-**Последствия:**
-- JWT токены могут истечь в неправильное время
-- Подписки могут некорректно определяться как истекшие
-- Пользователи в разных timezone получат разное поведение
-- Python 3.12+ выдаст DeprecationWarning
-
-**Как исправить:**
-```python
-# main.py:185
-from datetime import datetime, timezone
-
-expire = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-# server/database.py:948
-# Если subscription_expires - naive datetime:
-if profile.subscription_expires.tzinfo is None:
-    expires_aware = profile.subscription_expires.replace(tzinfo=timezone.utc)
-else:
-    expires_aware = profile.subscription_expires
-
-if expires_aware < datetime.now(timezone.utc):
-    # Истекла
-```
-
-**Приоритет:** FIX IMMEDIATELY
-
----
-
-### 🔴 Bug #5: Bot Message Handler Missing JSON Error Handling
-**Файл:** [bot/handlers/messages.py:60](bot/handlers/messages.py#L60)
-**Severity:** CRITICAL
-**Вероятность проявления:** LOW (только при API errors)
-
-**Проблема:**
-```python
-# Line 60
-response = await make_api_request(...)
-data = response.json()  # ❌ Может выбросить JSONDecodeError
-await send_response(message, data)
-```
-
-**Последствия:**
-- Бот крашится, если API возвращает non-JSON ответ
-- При 500 errors от API бот падает
-- Пользователь не получает сообщение об ошибке
-
-**Как исправить:**
-```python
-try:
-    response = await make_api_request(...)
-    response.raise_for_status()  # Проверка HTTP статуса
-    data = response.json()
-    await send_response(message, data)
-except httpx.HTTPStatusError as e:
-    logger.error(f"API error: {e.response.status_code}")
-    await message.answer("Прости, что-то пошло не так... Попробуй позже 😔")
-except json.JSONDecodeError:
-    logger.error(f"Invalid JSON from API: {response.text}")
-    await message.answer("Ой, у меня голова кругом... Напиши чуть позже?")
-```
-
-**Приоритет:** FIX BEFORE PRODUCTION
+**Файл:** [bot/handlers/messages.py:51-88](bot/handlers/messages.py#L51-L88)
+**Исправление:** Добавлен comprehensive error handling для JSON parsing
 
 ---
 
