@@ -94,7 +94,6 @@ class AIResponseGenerator:
         """Подготавливает данные для запроса к AI."""
         self.formatted_message = format_user_message(self.user_message, self.profile, self.timestamp)
         self.system_instruction = await build_system_instruction(self.profile, self.latest_summary)
-        # Передаем timestamp для сообщений пользователя
         await save_chat_message(self.user_id, 'user', self.formatted_message, timestamp=self.timestamp)
         
         image_part = await process_image_data(self.image_data, self.user_id)
@@ -162,32 +161,27 @@ class AIResponseGenerator:
         if tool_image:
             return True, None, tool_image  # Продолжаем с изображением
         
-        # Если были вызовы функций (не image), продолжаем итерацию
         if response.function_calls:
             logging.debug(f"Function call обработан для user {self.user_id}, продолжаем итерацию")
-            return True, None, None  # Продолжаем для получения финального ответа
-        
-        # Получаем финальный ответ
+            return True, None, None
+
         final_response = await handle_final_response(response, self.user_id, candidate)
-        
-        # Логирование usage metadata
+
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             logging.debug(f"Gemini usage for user {self.user_id}: {response.usage_metadata}")
-        
-        return False, final_response, None  # Готово
+
+        return False, final_response, None
     
     async def _save_response_and_trigger_analysis(self, final_response: str) -> None:
         """
         Сохраняет ответ и запускает фоновый анализ.
-        
+
         Args:
             final_response: Финальный ответ для сохранения
         """
         logging.debug(f"Сгенерирован финальный ответ для пользователя {self.user_id}: '{final_response}'")
-        # Не передаем timestamp для ответов модели - будет использоваться server_default из БД
         await save_chat_message(self.user_id, 'model', final_response)
-        
-        # Запускаем фоновую задачу анализа с обработкой ошибок
+
         from server.summarizer import generate_summary_and_analyze
         task = asyncio.create_task(generate_summary_and_analyze(self.user_id))
         task.add_done_callback(lambda t: _handle_background_task_error(t, self.user_id))
@@ -208,18 +202,15 @@ class AIResponseGenerator:
             }
         
         try:
-            # Загрузка контекста
             if not await self._load_user_context():
                 logging.error(f"Профиль пользователя {self.user_id} не найден!")
                 return {
                     "text": "Ой, кажется, мы не знакомы. Нажми /start, чтобы начать общение.",
                     "image_base64": None
                 }
-            
-            # Подготовка данных
+
             await self._prepare_request_data()
-            
-            # Итеративная генерация ответа
+
             image_b64 = None
             for iteration in range(MAX_AI_ITERATIONS):
                 should_continue, final_response, tool_image = await self._process_iteration(iteration + 1)
@@ -231,8 +222,7 @@ class AIResponseGenerator:
                 if final_response:
                     await self._save_response_and_trigger_analysis(final_response)
                     return {"text": final_response, "image_base64": image_b64}
-            
-            # Достигнут лимит итераций
+
             logging.warning(f"Достигнут лимит итераций ({MAX_AI_ITERATIONS}) для пользователя {self.user_id}.")
             return {
                 "text": "Что-то я запуталась в своих мыслях... Попробуй спросить что-нибудь другое.",
@@ -252,7 +242,6 @@ class AIResponseGenerator:
                 "image_base64": None
             }
         finally:
-            # MEMORY LEAK FIX: Явно очищаем большие объекты для освобождения памяти
             self.history.clear()
             self.unsummarized_messages = []
             self.tools = None
@@ -263,14 +252,12 @@ class AIResponseGenerator:
 def _handle_background_task_error(task: asyncio.Task, user_id: int) -> None:
     """
     Обработчик ошибок для фоновых задач.
-    Логирует исключения, которые произошли в фоновых задачах.
-    
+
     Args:
         task (asyncio.Task): Завершённая задача
         user_id (int): ID пользователя для контекста логирования
     """
     try:
-        # Получаем результат задачи - если была ошибка, она будет выброшена
         task.result()
     except asyncio.CancelledError:
         logging.info(f"Фоновая задача анализа для пользователя {user_id} была отменена")
@@ -400,12 +387,12 @@ def generate_user_prompt(profile: UserProfile) -> str:
 def format_user_message(user_message: str, profile: UserProfile, timestamp: datetime) -> str:
     """
     Форматирует сообщение пользователя с учетом его временной зоны.
-    
+
     Args:
         user_message (str): Исходное сообщение пользователя.
         profile (UserProfile): Профиль пользователя.
         timestamp (datetime): Временная метка сообщения.
-        
+
     Returns:
         str: Отформатированное сообщение пользователя.
     """
@@ -424,15 +411,14 @@ def format_user_message(user_message: str, profile: UserProfile, timestamp: date
 async def build_system_instruction(profile: UserProfile, latest_summary: ChatSummary | None) -> str:
     """
     Формирует системный промпт для AI с учётом эмоциональной памяти.
-    
+
     Args:
         profile (UserProfile): Профиль пользователя.
         latest_summary (ChatSummary | None): Последняя сводка чата.
-        
+
     Returns:
         str: Сформированный системный промпт.
     """
-    # Используем новый property для проверки premium
     is_premium = profile.is_premium_active
     logging.debug(f"Building prompt for user {profile.user_id}: {'PREMIUM' if is_premium else 'BASE'} (plan: {profile.subscription_plan}, expires: {profile.subscription_expires})")
 
@@ -441,8 +427,7 @@ async def build_system_instruction(profile: UserProfile, latest_summary: ChatSum
         system_instruction = PREMIUM_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
     else:
         system_instruction = BASE_SYSTEM_PROMPT.format(user_context=user_context, personality=PERSONALITIES)
- 
-    # Добавляем сводку к системному промпту
+
     if latest_summary:
         summary_context = (
             "\n\nЭто краткая сводка вашего предыдущего долгого разговора. "
@@ -450,8 +435,7 @@ async def build_system_instruction(profile: UserProfile, latest_summary: ChatSum
             f"Сводка: {latest_summary.summary}"
         )
         system_instruction += summary_context
-    
-    # Добавляем эмоциональную память
+
     emotional_memories = await get_emotional_memories(profile.user_id, limit=3)
     if emotional_memories:
         emotions_text = "\n\n🧠 ЭМОЦИОНАЛЬНАЯ ПАМЯТЬ (важные эмоциональные моменты пользователя):\n"
@@ -460,7 +444,7 @@ async def build_system_instruction(profile: UserProfile, latest_summary: ChatSum
         emotions_text += "\nИспользуй эту информацию для эмпатии и контекста. Можешь ссылаться на эти моменты: 'помнишь, ты тогда так расстроился из-за...'"
         system_instruction += emotions_text
         logging.debug(f"Добавлено {len(emotional_memories)} эмоциональных воспоминаний в промпт для user {profile.user_id}")
-        
+
     return system_instruction
 
 
@@ -493,14 +477,12 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
     Returns:
         genai_types.Part | None: Объект Part с изображением или None, если изображение отсутствует или произошла ошибка.
     """
-    MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024  # Конвертируем MB в байты
-    # Base64 увеличивает размер на ~33%, поэтому умножаем на 1.4 для проверки
+    MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024
     MAX_BASE64_SIZE = MAX_IMAGE_SIZE * 1.4
-    
+
     if not image_data:
         return None
-    
-    # SECURITY: Проверяем размер base64 строки ДО декодирования
+
     if len(image_data) > MAX_BASE64_SIZE:
         logging.warning(f"Base64 изображение слишком большое ({len(image_data)} символов, максимум {int(MAX_BASE64_SIZE)}) для пользователя {user_id}")
         return None
@@ -508,12 +490,11 @@ async def process_image_data(image_data: str | None, user_id: int) -> genai_type
     try:
         image_bytes = base64.b64decode(image_data)
         image_size = len(image_bytes)
-        
-        # Дополнительная валидация размера после декодирования (double-check)
+
         if image_size > MAX_IMAGE_SIZE:
             logging.warning(f"Изображение слишком большое ({image_size} байт, максимум {MAX_IMAGE_SIZE} байт) для пользователя {user_id}")
             return None
-        
+
         logging.debug(f"Обработка изображения размером {image_size} байт для пользователя {user_id}")
         return genai_types.Part.from_bytes(
             data=image_bytes,
@@ -537,7 +518,6 @@ async def prepare_chat_history(unsummarized_messages: list[ChatHistory], formatt
     Returns:
         list[genai_types.Content]: Готовая история чата.
     """
-    # Используем разные лимиты истории для FREE и PREMIUM пользователей
     history_limit = CHAT_HISTORY_LIMIT_PREMIUM if is_premium else CHAT_HISTORY_LIMIT_FREE
     history = create_history_from_messages(unsummarized_messages[-history_limit:])
 
@@ -641,7 +621,6 @@ async def generate_ai_response(user_id: int, user_message: str | None, timestamp
     Returns:
         Dict с ключами 'text' и 'image_base64'
     """
-    # Обрабатываем случай когда отправлено только изображение без текста
     if not user_message and image_data:
         user_message = "[Изображение]"
         logging.info(f"Получено изображение от пользователя {user_id} в {timestamp} без текста")
@@ -654,19 +633,19 @@ async def generate_ai_response(user_id: int, user_message: str | None, timestamp
 @gemini_circuit_breaker.call
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10), # Экспоненциальная задержка
+    wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
 async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: list, tools: list, system_instruction: str, thinking_budget: int = 0):
     """
     Выполняет вызов к Gemini API с логикой повторных попыток и Circuit Breaker защитой.
-    
+
     Circuit Breaker защищает от каскадных сбоев:
     - Блокирует запросы после 5 сбоев подряд
     - Ждет 60 секунд перед повторной попыткой
     - Восстанавливается после 2 успешных запросов
-    
+
     Args:
         user_id (int): Уникальный идентификатор пользователя.
         model_name (str): Название модели для генерации.
@@ -674,20 +653,19 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
         tools (list): Список инструментов для использования моделью.
         system_instruction (str): Системная инструкция для модели.
         thinking_budget (int): Бюджет для "мышления" модели.
-        
+
     Returns:
         response: Ответ от API Gemini.
-        
+
     Raises:
         CircuitBreakerError: Если circuit breaker открыт
         APIError: При ошибках API после retry
     """
     logging.debug(f"Попытка вызова Gemini API для пользователя {user_id}")
-    
-    # Log system instruction and context for debugging
+
     system_log = system_instruction[:500] + "..." if len(system_instruction) > 500 else system_instruction
     logging.debug(f"Системная инструкция для пользователя {user_id}: {system_log}")
-    
+
     context_parts = []
     for content in contents:
         role = content.role
@@ -712,11 +690,10 @@ async def call_gemini_api_with_retry(user_id: int, model_name: str, contents: li
                 )
             )
         )
-        
-        # Log token usage for debugging
+
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             logging.debug(f"Потребление токенов для пользователя {user_id}: prompt={response.usage_metadata.prompt_token_count}, candidates={response.usage_metadata.candidates_token_count}")
-        
+
         return response
     except APIError as e:
         logging.warning(f"Ошибка Gemini API для пользователя {user_id}: {e}. Повторная попытка...")

@@ -17,10 +17,6 @@ import config
 from server.database import get_profile, check_message_limit
 from server.tts import create_telegram_voice_message
 
-# =============================================================================
-# JWT SETUP AND DEPENDENCIES
-# =============================================================================
-
 security = HTTPBearer()
 SECRET_KEY = config.JWT_SECRET
 ALGORITHM = config.JWT_ALGORITHM
@@ -102,10 +98,6 @@ async def verify_admin(user_id: int = Depends(verify_token)) -> int:
     return user_id
 
 
-# =============================================================================
-# TTS AND VOICE MESSAGE HELPERS
-# =============================================================================
-
 def strip_voice_markers(text: str) -> str:
     """
     Remove [VOICE] marker and intonation description.
@@ -120,14 +112,11 @@ def strip_voice_markers(text: str) -> str:
     Returns:
         str: Cleaned text without voice markers
     """
-    # Remove [VOICE]
     text = text.replace('[VOICE]', '', 1).strip()
 
-    # Remove intonation description before colon
     if ':' in text:
         colon_idx = text.index(':')
 
-        # Case 1: with quotes '[VOICE]Say with smile: "Привет"'
         if '"' in text:
             quote_idx = text.index('"', colon_idx)
             between = text[colon_idx+1:quote_idx]
@@ -135,11 +124,8 @@ def strip_voice_markers(text: str) -> str:
                 text = text[quote_idx+1:]
                 if text.endswith('"'):
                     text = text[:-1]
-        # Case 2: without quotes '[VOICE]Say sadly: Ой, Саш...'
         else:
-            # Check if before colon are English words (Say, Saying, etc)
             before_colon = text[:colon_idx].strip()
-            # If it looks like instruction (starts with Say), remove it
             if before_colon.lower().startswith('say'):
                 text = text[colon_idx+1:].strip()
 
@@ -171,26 +157,20 @@ async def handle_tts_generation(user_id: int, response_text: str) -> dict:
 
     if has_voice_marker:
         if not is_premium:
-            # Strip [VOICE] and intonation for non-premium, skip TTS
             clean_text = strip_voice_markers(response_text)
             return {
                 "text": clean_text,
                 "voice_data": None
             }
         else:
-            # Proceed with TTS for premium user
             text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
-
-            # Create in-memory file object instead of real file
             voice_file_object = io.BytesIO()
 
-            # Generate voice message
             success = await create_telegram_voice_message(text_to_speak, voice_file_object)
 
             if success:
                 voice_file_object.seek(0)
                 voice_message_bytes = voice_file_object.read()
-                # Encode binary data to base64 for JSON transmission
                 voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
                 logging.info(f"TTS generated successfully for user {user_id}: {len(voice_message_bytes)} bytes")
                 return {
@@ -198,7 +178,6 @@ async def handle_tts_generation(user_id: int, response_text: str) -> dict:
                     "voice_data": voice_message_data
                 }
             else:
-                # If generation failed (e.g., quota exceeded), send text only
                 logging.warning(f"TTS generation failed for user {user_id}, sending text only")
                 clean_text = strip_voice_markers(response_text)
                 return {
@@ -211,10 +190,6 @@ async def handle_tts_generation(user_id: int, response_text: str) -> dict:
         "voice_data": None
     }
 
-
-# =============================================================================
-# MESSAGE LIMIT HELPERS
-# =============================================================================
 
 async def check_message_limits(user_id: int) -> dict:
     """
@@ -229,10 +204,6 @@ async def check_message_limits(user_id: int) -> dict:
     limit_check = await check_message_limit(user_id)
     return limit_check
 
-
-# =============================================================================
-# RATE LIMITING HELPERS
-# =============================================================================
 
 def get_limiter_key(request) -> str:
     """

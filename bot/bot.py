@@ -85,104 +85,82 @@ async def main() -> None:
     bot = Bot(token=TELEGRAM_TOKEN)
     redis: Redis | None = None
     storage: RedisStorage | None = None
-    
+
     try:
-        # Инициализируем хранилище Redis
         redis = Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
         storage = RedisStorage(redis=redis)
-
-        # Передаем Redis client в payment handler для rate limiting
         set_redis_client(redis)
 
-        # Создаем диспетчер и передаем ему хранилище
         dp = Dispatcher(storage=storage)
-        
         dp.update.middleware(ErrorMiddleware())
         dp.include_router(router)
 
         await bot.delete_webhook(drop_pending_updates=True)
 
-        # Регистрируем обработчики сигналов для graceful shutdown
-        # На Windows SIGTERM может не работать корректно, поэтому только SIGINT
         signal.signal(signal.SIGINT, signal_handler)
-        
-        # SIGTERM только для Unix-подобных систем
         if platform.system() != 'Windows':
             signal.signal(signal.SIGTERM, signal_handler)
-            logger.debug("Обработчики сигналов SIGTERM и SIGINT зарегистрированы")
+            logger.debug("Signal handlers registered (SIGTERM, SIGINT)")
         else:
-            logger.debug("Обработчик сигнала SIGINT зарегистрирован (Windows)")
+            logger.debug("Signal handler registered (SIGINT only, Windows)")
 
-        # Используем async context manager для httpx клиента с настраиваемыми таймаутами
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(HTTPX_TIMEOUT, connect=HTTPX_CONNECT_TIMEOUT)
         ) as client:
-            # Добавляем middleware с клиентом
             dp.update.middleware(HttpClientMiddleware(client))
-            
+
             try:
-                logger.debug("Запуск polling...")
-                
-                # Создаём задачу polling
+                logger.debug("Starting polling...")
+
                 polling_task = asyncio.create_task(dp.start_polling(bot))
-                
-                # Создаём задачу ожидания shutdown сигнала
                 shutdown_task = asyncio.create_task(shutdown_event.wait())
-                
-                # Ждём завершения одной из задач
+
                 done, pending = await asyncio.wait(
                     [polling_task, shutdown_task],
                     return_when=asyncio.FIRST_COMPLETED
                 )
-                
-                # Если получен shutdown сигнал
+
                 if shutdown_task in done:
-                    logger.info("Получен сигнал остановки. Завершаем обработку текущих сообщений...")
-                    
-                    # Останавливаем polling gracefully
+                    logger.info("Shutdown signal received. Finishing current messages...")
+
                     await dp.stop_polling()
-                    
-                    # Даём время на завершение обработки текущих сообщений (макс 10 сек)
+
                     try:
                         await asyncio.wait_for(polling_task, timeout=10.0)
-                        logger.debug("Все текущие сообщения обработаны")
+                        logger.debug("All current messages processed")
                     except asyncio.TimeoutError:
-                        logger.warning("Таймаут ожидания завершения обработки сообщений (10s)")
+                        logger.warning("Timeout waiting for message processing (10s)")
                         polling_task.cancel()
                         try:
                             await polling_task
                         except asyncio.CancelledError:
                             pass
-                
+
             except Exception as e:
-                logger.error(f"Критическая ошибка в main loop: {e}", exc_info=True)
+                logger.error(f"Critical error in main loop: {e}", exc_info=True)
                 raise
-            
+
     finally:
-        # Cleanup resources
-        logger.debug("Начинаем cleanup ресурсов...")
-        
-        # Закрываем сессию бота
+        logger.debug("Starting resource cleanup...")
+
         try:
             await bot.session.close()
-            logger.debug("Bot session закрыта")
+            logger.debug("Bot session closed")
         except Exception as e:
-            logger.error(f"Ошибка при закрытии bot session: {e}")
-        
-        # Закрываем storage
+            logger.error(f"Error closing bot session: {e}")
+
         if storage:
             try:
                 await storage.close()
-                logger.debug("Redis storage закрыт")
+                logger.debug("Redis storage closed")
             except Exception as e:
-                logger.error(f"Ошибка при закрытии storage: {e}")
-        
-        # Закрываем Redis соединение
+                logger.error(f"Error closing storage: {e}")
+
         if redis:
             try:
                 await redis.close()
-                logger.debug("Redis connection закрыто")
+                logger.debug("Redis connection closed")
             except Exception as e:
-                logger.error(f"Ошибка при закрытии Redis connection: {e}")
-        
-        logger.info("Бот полностью остановлен. Goodbye! 👋")
+                logger.error(f"Error closing Redis connection: {e}")
+
+        logger.info("Bot shutdown complete. Goodbye! 👋")

@@ -1,7 +1,4 @@
-"""
-API routes package.
-Organizes API endpoints into logical modules.
-"""
+"""API routes package."""
 
 from fastapi import APIRouter
 
@@ -13,29 +10,14 @@ from .premium import router as premium_router
 from .admin import router as admin_router
 from .analytics import router as analytics_router
 
-# ============================================================================
-# API ROUTER SETUP
-# ============================================================================
 
 def setup_routes(app) -> None:
-    """
-    Register all route modules with the FastAPI application.
-
-    Args:
-        app: FastAPI application instance
-    """
-    # Health checks (no auth required)
+    """Register all route modules with the FastAPI application."""
     app.include_router(health_router)
-
-    # Authentication (no auth required)
     app.include_router(auth_router)
-
-    # User endpoints
     app.include_router(chat_router)
     app.include_router(profile_router)
     app.include_router(premium_router)
-
-    # Admin endpoints
     app.include_router(admin_router)
     app.include_router(analytics_router)
 

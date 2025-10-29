@@ -28,17 +28,15 @@ from config import (
 )
 from server.models import Base, UserProfile, LongTermMemory, ChatHistory, ChatSummary
 
-# Создаем асинхронный "движок" и фабрику сессий
 async_engine = create_async_engine(
     DATABASE_URL,
-    pool_size=20,  # Количество соединений, которые будут оставаться открытыми в пуле
-    max_overflow=10, # Максимальное количество "дополнительных" соединений сверх pool_size
-    pool_timeout=30, # Время в секундах, которое можно ждать соединения перед тем, как выбросить ошибку
-    pool_recycle=1800 # Время в секундах, через которое соединение будет пересоздано (для предотвращения проблем с "устаревшими" соединениями)
+    pool_size=20,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800
 )
 async_session_factory = async_sessionmaker(async_engine)
 
-# Настраиваем мониторинг запросов
 setup_query_monitoring(async_engine, threshold=1.0)
 
 def get_profile_cache_key(user_id: int) -> str:
@@ -49,8 +47,6 @@ def get_chat_messages_cache_key(user_id: int) -> str:
     """Генерирует ключ для кэша сообщений чата."""
     return f"chat_messages:{user_id}"
 
-# --- Circuit Breaker для Redis ---
-# Используем правильную реализацию из utils/circuit_breaker.py
 redis_circuit_breaker = CircuitBreaker(
     name="Redis",
     failure_threshold=3,
@@ -118,13 +114,11 @@ async def _safe_redis_delete(key: str) -> bool:
         logging.warning(f"Redis DELETE failed for key {key}: {e}")
         return False
 
-# Функция для инициализации БД (создания таблицы)
 async def init_db():
     """Инициализирует базу данных, создавая все таблицы."""
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-# CRUD-операции
 async def get_profile(user_id: int) -> UserProfile | None:
     """
     Получает профиль пользователя, используя кэширование в Redis.
@@ -135,13 +129,11 @@ async def get_profile(user_id: int) -> UserProfile | None:
     Returns:
         UserProfile | None: Объект профиля пользователя или None, если профиль не найден.
     """
-    # Пробуем получить из кэша с retry
     cache_key = get_profile_cache_key(user_id)
     cached_profile_json = await _safe_redis_get(cache_key)
     if cached_profile_json:
         try:
             profile_data = json.loads(cached_profile_json)
-            # Преобразуем строки с датами обратно в объекты date/datetime
             for key, value in profile_data.items():
                 if isinstance(value, str):
                     try:
@@ -153,24 +145,20 @@ async def get_profile(user_id: int) -> UserProfile | None:
                             pass
             return UserProfile(**profile_data)
         except (json.JSONDecodeError, TypeError) as e:
-            # Кэш поврежден - удаляем его
             logging.warning(f"Поврежденные данные в кэше для user {user_id}: {e}")
             await _safe_redis_delete(cache_key)
 
-    # Если в кэше нет или произошла ошибка, идем в БД
     try:
         async with async_session_factory() as session:
             result = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
             profile = result.scalars().first()
 
-        # Сохраняем в кэш, если профиль найден
         if profile:
             profile_dict = profile.to_dict()
-            # Конвертируем date/datetime в ISO строки для JSON
             for key, value in profile_dict.items():
                 if isinstance(value, (datetime, date)):
                     profile_dict[key] = value.isoformat()
-            
+
             cache_key = get_profile_cache_key(user_id)
             await _safe_redis_set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
 
@@ -289,20 +277,17 @@ async def save_long_term_memory(user_id: int, fact: str, category: str, intensit
     """
     try:
         async with async_session_factory() as session:
-            # 1. Проверяем, существует ли уже такой факт
             stmt = select(LongTermMemory).where(
                 LongTermMemory.user_id == user_id,
                 LongTermMemory.fact == fact
             )
             result = await session.execute(stmt)
             existing_fact = result.scalars().first()
-            
-            # 2. Если факт уже существует, ничего не делаем и сообщаем об этом
+
             if existing_fact:
                 logging.debug(f"Факт для user_id {user_id} уже существует: '{fact}'. Пропускаем сохранение.")
                 return {"status": "skipped", "reason": "duplicate fact"}
 
-            # 3. Если факта нет, сохраняем его
             logging.debug(f"Сохранение нового факта для user_id {user_id} (category: {category}, intensity: {intensity})")
             memory = LongTermMemory(
                 user_id=user_id,
@@ -568,45 +553,36 @@ async def save_chat_message(user_id: int, role: str, content: str, timestamp: da
         content: Содержимое сообщения
         timestamp: Временная метка (если None, используется текущее время БД)
     """
-    # Sanitize content to prevent XSS/prompt injection
     sanitized_content = bleach.clean(content, tags=[], strip=True)
-    
     today = date.today()
-    
+
     try:
         async with async_session_factory() as session:
-            # Используем атомарную операцию UPDATE для счетчика
-            # CASE WHEN гарантирует корректное обновление без race condition
             stmt = (
                 update(UserProfile)
                 .where(UserProfile.user_id == user_id)
                 .values(
                     daily_message_count=(
-                        # Если дата изменилась - ставим 1, иначе инкрементируем
-                        1 if UserProfile.last_message_date != today 
+                        1 if UserProfile.last_message_date != today
                         else UserProfile.daily_message_count + 1
                     ),
                     last_message_date=today
                 )
             )
             await session.execute(stmt)
-            
-            # Сохраняем сообщение в истории чата
-            # Для сообщений модели не передаем timestamp, чтобы БД использовала server_default
+
             if timestamp is not None:
-                # Убираем timezone, так как колонка TIMESTAMP WITHOUT TIME ZONE
                 naive_timestamp = timestamp.replace(tzinfo=None) if timestamp.tzinfo else timestamp
                 message = ChatHistory(user_id=user_id, role=role, content=sanitized_content, timestamp=naive_timestamp)
             else:
                 message = ChatHistory(user_id=user_id, role=role, content=sanitized_content)
             session.add(message)
-            
+
             await session.commit()
     except SQLAlchemyError as e:
         logging.error(f"Ошибка БД при сохранении сообщения для user {user_id}: {e}")
         raise
-        
-    # Инвалидируем кэш сообщений чата
+
     if REDIS_CLIENT:
         try:
             cache_key = get_chat_messages_cache_key(user_id)
@@ -669,25 +645,23 @@ async def get_user_context_data(user_id: int) -> tuple[UserProfile | None, ChatS
     """
     Оптимизированная функция для получения всех данных пользователя одним запросом к БД.
     Решает N+1 Query Problem.
-    
+
     Args:
         user_id (int): Уникальный идентификатор пользователя.
-        
+
     Returns:
         tuple: (profile, latest_summary, unsummarized_messages)
     """
     try:
         async with async_session_factory() as session:
-            # Получаем профиль
             profile_result = await session.execute(
                 select(UserProfile).where(UserProfile.user_id == user_id)
             )
             profile = profile_result.scalars().first()
-            
+
             if not profile:
                 return None, None, []
-            
-            # Получаем последнюю сводку
+
             summary_result = await session.execute(
                 select(ChatSummary)
                 .where(ChatSummary.user_id == user_id)
@@ -696,8 +670,7 @@ async def get_user_context_data(user_id: int) -> tuple[UserProfile | None, ChatS
             )
             latest_summary = summary_result.scalars().first()
             last_message_id = latest_summary.last_message_id if latest_summary else 0
-            
-            # Получаем несуммаризированные сообщения
+
             messages_result = await session.execute(
                 select(ChatHistory)
                 .where(
@@ -707,17 +680,16 @@ async def get_user_context_data(user_id: int) -> tuple[UserProfile | None, ChatS
                 .order_by(ChatHistory.timestamp.asc())
             )
             messages = messages_result.scalars().all()
-            
-            # Кэшируем профиль в Redis если доступен
+
             if profile:
                 profile_dict = profile.to_dict()
                 for key, value in profile_dict.items():
                     if isinstance(value, (datetime, date)):
                         profile_dict[key] = value.isoformat()
-                
+
                 cache_key = get_profile_cache_key(user_id)
                 await _safe_redis_set(cache_key, json.dumps(profile_dict), ex=CACHE_TTL_SECONDS)
-            
+
             return profile, latest_summary, messages
             
     except SQLAlchemyError as e:

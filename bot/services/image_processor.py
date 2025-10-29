@@ -8,9 +8,9 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
-MAX_IMAGE_DIMENSIONS = (1024, 1024)  # Max resolution
-JPEG_QUALITY = 85  # Качество JPEG сжатия
+MAX_IMAGE_SIZE = 10 * 1024 * 1024
+MAX_IMAGE_DIMENSIONS = (1024, 1024)
+JPEG_QUALITY = 85
 
 
 class ImageProcessingError(Exception):
@@ -43,15 +43,12 @@ async def process_image(message: Message) -> Optional[str]:
     output_bytes = None
 
     try:
-        # Выбираем лучшее качество (последнее в списке)
         photo = message.photo[-1]
 
-        # Скачиваем фото в память
         photo_bytes = BytesIO()
         await message.bot.download(photo, destination=photo_bytes)
         photo_bytes.seek(0)
 
-        # Проверяем размер сырых данных
         raw_data = photo_bytes.getvalue()
         raw_size = len(raw_data)
         if raw_size > MAX_IMAGE_SIZE:
@@ -62,21 +59,16 @@ async def process_image(message: Message) -> Optional[str]:
             )
             return None
 
-        # Валидация и обработка изображения с Pillow
         image_stream = BytesIO(raw_data)
 
         try:
-            # Используем context manager для автоматического закрытия
             with Image.open(image_stream) as img_verify:
-                # Проверяем, что это валидное изображение
                 img_verify.verify()
 
-            # Переоткрываем после verify
             image_stream.close()
             image_stream = BytesIO(raw_data)
 
             with Image.open(image_stream) as image:
-                # Конвертируем в RGB если RGBA/LA/P (для JPEG)
                 if image.mode in ('RGBA', 'LA', 'P'):
                     background = Image.new('RGB', image.size, (255, 255, 255))
                     if image.mode == 'P':
@@ -87,10 +79,8 @@ async def process_image(message: Message) -> Optional[str]:
                         background.paste(image)
                     image = background
 
-                # Изменяем размер если слишком большой
                 image.thumbnail(MAX_IMAGE_DIMENSIONS, Image.Resampling.LANCZOS)
 
-                # Сохраняем как JPEG с оптимизацией
                 output_bytes = BytesIO()
                 try:
                     image.save(output_bytes, format='JPEG', quality=JPEG_QUALITY, optimize=True)
@@ -98,7 +88,6 @@ async def process_image(message: Message) -> Optional[str]:
                 finally:
                     output_bytes.close()
 
-                # Финальная проверка размера после обработки
                 if len(processed_bytes) > MAX_IMAGE_SIZE:
                     logger.warning(
                         f"Processed image still too large for user {user_id}: "
@@ -131,7 +120,6 @@ async def process_image(message: Message) -> Optional[str]:
         )
         return None
     finally:
-        # Гарантируем закрытие всех BytesIO объектов
         if photo_bytes:
             photo_bytes.close()
         if image_stream:

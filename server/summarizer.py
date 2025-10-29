@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 """
 Модуль для создания и управления сводками (summaries) диалогов.
 """
@@ -55,10 +53,8 @@ JSON_SUMMARY_AND_ANALYSIS_PROMPT = (
     "ВАЛИДНЫЙ JSON-ОТВЕТ:"
 )
 
-# Настраиваем Gemini API
 client = GEMINI_CLIENT
 
-# --- Pydantic схемы для надежного парсинга JSON ---
 class RelationshipAnalysis(BaseModel):
     quality_score: int = Field(description="Оценка качества общения от -5 до +10.")
     key_insight: str = Field(description="Ключевой вывод об отношениях.")
@@ -70,25 +66,22 @@ class SummaryAndAnalysisResponse(BaseModel):
 def parse_summary_json(response_text: str, user_id: int) -> dict | None:
     """
     Парсит JSON из ответа модели, с очисткой Markdown и валидацией через Pydantic.
-    
+
     Args:
         response_text (str): Текст ответа от модели.
         user_id (int): ID пользователя для логирования.
-        
+
     Returns:
         dict | None: Распарсенные данные или None при ошибке.
     """
     try:
-        # Очищаем ответ от блоков кода Markdown
         cleaned_text = response_text.strip()
         if cleaned_text.startswith("```json"):
             cleaned_text = cleaned_text[7:]
         if cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[:-3]
-        
+
         analysis_data = json.loads(cleaned_text)
-        
-        # Валидация через Pydantic
         validated = SummaryAndAnalysisResponse.model_validate(analysis_data)
         return validated.model_dump()
         
@@ -116,16 +109,14 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
     prompt = JSON_SUMMARY_AND_ANALYSIS_PROMPT.format(chat_history=chat_history_text)
 
     try:
-        # Используем модель из конфигурации для summarizer
         response = await client.aio.models.generate_content(
             model=SUMMARIZER_MODEL_NAME,
             contents=prompt
         )
-        
-        # Log usage metadata for monitoring
+
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             logging.debug(f"Gemini summarizer usage for user {user_id}: {response.usage_metadata}")
-        
+
         analysis_data = parse_summary_json(response.text, user_id)
         if not analysis_data:
             logging.warning(f"Не удалось распарсить анализ для user_id {user_id}. Пропускаем обновление.")
@@ -135,7 +126,6 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
         relationship_analysis = analysis_data.get("relationship_analysis", {})
         quality_score = relationship_analysis.get("quality_score", 0)
 
-        # Критичные операции с БД - выполняем с retry
         await _update_profile_and_summary_with_retry(
             user_id=user_id,
             quality_score=quality_score,
@@ -162,7 +152,7 @@ async def _update_profile_and_summary_with_retry(
     """
     Критичные операции с БД с retry механизмом в ОДНОЙ ТРАНЗАКЦИИ.
     Гарантирует атомарность: либо все операции выполнятся, либо ни одна.
-    
+
     Args:
         user_id: ID пользователя
         quality_score: Оценка качества общения
@@ -174,20 +164,17 @@ async def _update_profile_and_summary_with_retry(
     from sqlalchemy.dialects.postgresql import insert
     from server.models import UserProfile, ChatSummary, ChatHistory
     from datetime import datetime
-    
+
     try:
-        # ТРАНЗАКЦИЯ: Все операции в одной сессии с автоматическим rollback при ошибке
         async with async_session_factory() as session:
             async with session.begin():
-                # 1. Обновляем relationship_score в профиле
                 stmt = (
                     update(UserProfile)
                     .where(UserProfile.user_id == user_id)
                     .values(relationship_score=UserProfile.relationship_score + quality_score)
                 )
                 await session.execute(stmt)
-                
-                # 2. Сохраняем сводку (UPSERT)
+
                 data = {
                     "summary": new_summary,
                     "last_message_id": last_message_id,
@@ -199,20 +186,17 @@ async def _update_profile_and_summary_with_retry(
                     set_=data
                 )
                 await session.execute(stmt)
-                
-                # 3. Удаляем обработанные сообщения
+
                 stmt = delete(ChatHistory).where(
                     ChatHistory.user_id == user_id,
                     ChatHistory.id <= last_message_id
                 )
                 await session.execute(stmt)
-                
-                # Если дошли сюда - все ОК, транзакция будет зафиксирована
-        
+
         logging.debug(f"Профиль и сводка успешно обновлены в транзакции для user_id {user_id}")
     except SQLAlchemyError as e:
         logging.error(f"Ошибка БД при обновлении профиля/сводки для user_id {user_id}: {e}", exc_info=True)
-        raise  # Будет повторная попытка через retry
+        raise
     except Exception as e:
         logging.error(f"Неожиданная ошибка при обновлении для user_id {user_id}: {e}", exc_info=True)
         raise

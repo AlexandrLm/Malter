@@ -11,10 +11,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Получаем ключ шифрования из переменных окружения
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-
-# Инициализируем cipher suite
 _cipher_suite: Optional[Fernet] = None
 
 if ENCRYPTION_KEY:
@@ -34,7 +31,7 @@ else:
 def generate_encryption_key() -> str:
     """
     Генерирует новый ключ шифрования.
-    
+
     Returns:
         str: Новый ключ шифрования в base64 формате
     """
@@ -44,24 +41,23 @@ def generate_encryption_key() -> str:
 def encrypt_field(value: Optional[str]) -> Optional[str]:
     """
     Шифрует строковое значение для безопасного хранения в БД.
-    
+
     Args:
         value: Значение для шифрования
-        
+
     Returns:
         Зашифрованное значение в base64 или None если value пустой
-        
+
     Raises:
         RuntimeError: Если шифрование не инициализировано
     """
     if value is None or value == "":
         return None
-    
+
     if _cipher_suite is None:
-        # В development режиме возвращаем как есть с предупреждением
         logger.warning("Encryption disabled - storing data in plaintext")
         return value
-    
+
     try:
         encrypted = _cipher_suite.encrypt(value.encode())
         return encrypted.decode()
@@ -73,24 +69,23 @@ def encrypt_field(value: Optional[str]) -> Optional[str]:
 def decrypt_field(encrypted_value: Optional[str]) -> Optional[str]:
     """
     Расшифровывает значение из БД.
-    
+
     Args:
         encrypted_value: Зашифрованное значение из БД
-        
+
     Returns:
         Расшифрованное значение или None если encrypted_value пустой
-        
+
     Raises:
         RuntimeError: Если расшифровка не удалась
     """
     if encrypted_value is None or encrypted_value == "":
         return None
-    
+
     if _cipher_suite is None:
-        # В development режиме возвращаем как есть
         logger.warning("Encryption disabled - reading plaintext data")
         return encrypted_value
-    
+
     try:
         decrypted = _cipher_suite.decrypt(encrypted_value.encode())
         return decrypted.decode()
@@ -105,27 +100,24 @@ def decrypt_field(encrypted_value: Optional[str]) -> Optional[str]:
 def is_encryption_enabled() -> bool:
     """
     Проверяет, включено ли шифрование.
-    
+
     Returns:
         bool: True если шифрование включено, False иначе
     """
     return _cipher_suite is not None
 
 
-# Примеры использования и тесты
 if __name__ == "__main__":
-    # Генерация ключа для .env
     print("Новый ключ шифрования для .env:")
     print(f"ENCRYPTION_KEY={generate_encryption_key()}")
     print("\n⚠️ ВАЖНО: Сохраните этот ключ в .env и НИКОГДА не коммитьте в git!")
     print("⚠️ При смене ключа все зашифрованные данные станут недоступны!\n")
-    
-    # Тест шифрования (если ключ установлен)
+
     if is_encryption_enabled():
         test_data = "Алексей"
         encrypted = encrypt_field(test_data)
         decrypted = decrypt_field(encrypted)
-        
+
         print(f"Тест шифрования:")
         print(f"  Исходные данные: {test_data}")
         print(f"  Зашифровано: {encrypted}")

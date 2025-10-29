@@ -28,39 +28,16 @@ import config
 from server.routes import setup_routes
 from server.api_helpers import get_limiter_key
 
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
-
 LOG_LEVEL = config.LOG_LEVEL
 logging.basicConfig(level=getattr(logging, LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# RATE LIMITING SETUP
-# ============================================================================
-
 limiter = Limiter(key_func=get_limiter_key)
-
-# ============================================================================
-# LIFESPAN AND STARTUP/SHUTDOWN
-# ============================================================================
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application startup and shutdown lifecycle.
-
-    Startup:
-    - Initialize scheduler for background tasks
-    - Start monitoring
-
-    Shutdown:
-    - Gracefully shutdown scheduler
-    - Close connections
-    """
-    # Startup
+    """Application startup and shutdown lifecycle."""
     logger.info("🚀 Starting EvolveAI Backend...")
 
     from server.scheduler import start_scheduler
@@ -69,16 +46,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     logger.info("🛑 Shutting down EvolveAI Backend...")
     from server.scheduler import shutdown_scheduler
     shutdown_scheduler()
     logger.info("✅ Application shutdown complete")
 
-
-# ============================================================================
-# FASTAPI APPLICATION INITIALIZATION
-# ============================================================================
 
 app = FastAPI(
     title="EvolveAI Backend",
@@ -89,25 +61,15 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
-# Add rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, lambda request, exc: {
     "detail": "Rate limit exceeded"
 })
 
-# Add Prometheus metrics middleware
 app.add_middleware(PrometheusMiddleware)
 app.add_route("/metrics", metrics)
 
-# ============================================================================
-# ROUTE REGISTRATION
-# ============================================================================
-
 setup_routes(app)
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
 
 if __name__ == "__main__":
     logger.info(f"Starting server on 0.0.0.0:8000")

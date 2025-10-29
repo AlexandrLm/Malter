@@ -27,7 +27,7 @@ geolocation_service = GeolocationService()
 
 @router.message(ProfileStates.name, F.text)
 async def process_name(message: types.Message, state: FSMContext) -> None:
-    """Обработчик ввода имени."""
+    """Обрабатывает ввод имени пользователя."""
     if is_valid_name(message.text):
         await state.update_data(name=message.text)
         await message.answer(
@@ -41,13 +41,13 @@ async def process_name(message: types.Message, state: FSMContext) -> None:
 
 @router.message(ProfileStates.name)
 async def process_name_invalid(message: types.Message) -> None:
-    """Обработчик неверного формата имени."""
+    """Обрабатывает неверный формат имени."""
     await message.answer("Пожалуйста, отправь свое имя в виде текста.")
 
 
 @router.message(ProfileStates.gender, F.text.in_(["Мужчина", "Женщина"]))
 async def process_gender(message: types.Message, state: FSMContext) -> None:
-    """Обработчик выбора пола."""
+    """Обрабатывает выбор пола пользователя."""
     await state.update_data(gender=message.text.lower())
     await message.answer(
         "И последний вопрос, чтобы я не путалась во времени... В каком городе ты живешь?",
@@ -58,20 +58,13 @@ async def process_gender(message: types.Message, state: FSMContext) -> None:
 
 @router.message(ProfileStates.gender)
 async def process_gender_invalid(message: types.Message) -> None:
-    """Обработчик неверного выбора пола."""
+    """Обрабатывает неверный выбор пола."""
     await message.answer("Пожалуйста, выбери один из вариантов на клавиатуре.")
 
 
 @router.message(ProfileStates.city, F.text)
 async def process_city(message: types.Message, state: FSMContext, client: httpx.AsyncClient) -> None:
-    """
-    Обработчик ввода города с улучшенной обработкой ошибок.
-    
-    Args:
-        message: Сообщение с названием города
-        state: FSM состояние
-        client: HTTP клиент
-    """
+    """Обрабатывает ввод города с геолокацией и валидацией."""
     if not message.text:
         await message.answer("Пожалуйста, отправь название города в виде текста.")
         return
@@ -133,5 +126,5 @@ async def process_city(message: types.Message, state: FSMContext, client: httpx.
 
 @router.message(ProfileStates.city)
 async def process_city_invalid(message: types.Message) -> None:
-    """Обработчик неверного формата города."""
+    """Обрабатывает неверный формат города."""
     await message.answer("Пожалуйста, отправь название города в виде текста.")

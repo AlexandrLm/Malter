@@ -57,8 +57,6 @@ async def check_payment_rate_limit(user_id: int) -> tuple[bool, int]:
 
     try:
         key = f"payment_rate:{user_id}"
-
-        # Получаем текущий счетчик
         current_attempts = await _redis_client.get(key)
 
         if current_attempts is None:
@@ -87,7 +85,6 @@ async def record_payment_attempt(user_id: int):
         key = f"payment_rate:{user_id}"
         ttl_seconds = PAYMENT_RATE_LIMIT_HOURS * 3600
 
-        # Используем pipeline для атомарности
         pipe = _redis_client.pipeline()
         pipe.incr(key)
         pipe.expire(key, ttl_seconds)
@@ -107,8 +104,7 @@ async def buy_premium_command(message: types.Message, state: FSMContext):
     if not PAYMENT_PROVIDER_TOKEN:
         await message.answer("💳 Платежи временно недоступны. Попробуйте позже.")
         return
-    
-    # Проверяем rate limit
+
     allowed, remaining = await check_payment_rate_limit(user_id)
     if not allowed:
         logger.warning(f"Payment rate limit exceeded for user {user_id}")
@@ -117,8 +113,7 @@ async def buy_premium_command(message: types.Message, state: FSMContext):
             f"Попробуйте через {PAYMENT_RATE_LIMIT_HOURS} час(а)."
         )
         return
-    
-    # Устанавливаем FSM состояние
+
     await state.set_state(PaymentStates.choosing_plan)
     
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -164,10 +159,8 @@ async def handle_subscription_choice(callback: types.CallbackQuery, state: FSMCo
         logger.warning(f"Invalid state for payment callback from user {user_id}: {current_state}")
         await callback.answer("Ошибка: неверное состояние. Начните заново с /buy_premium", show_alert=True)
         return
-    
+
     subscription_type = callback.data.replace("buy_", "")
-    
-    # Валидация subscription_type
     valid_types = ["1_month", "3_months", "6_months", "12_months"]
     if subscription_type not in valid_types:
         logger.error(f"Invalid subscription type from user {user_id}: {subscription_type}")
@@ -183,18 +176,13 @@ async def handle_subscription_choice(callback: types.CallbackQuery, state: FSMCo
     
     price = SUBSCRIPTION_PRICES[subscription_type]
     days = duration_days[subscription_type]
-    
-    # Записываем попытку платежа
+
     await record_payment_attempt(user_id)
-    
-    # Переходим в состояние ожидания платежа
     await state.set_state(PaymentStates.pending_payment)
     await state.update_data(subscription_type=subscription_type, price=price, days=days)
-    
-    # Формируем описание
+
     description = f"Премиум подписка EvolveAI на {days} дней"
-    
-    # Создаем инвойс
+
     try:
         await callback.bot.send_invoice(
             chat_id=callback.message.chat.id,
@@ -235,25 +223,21 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
     payload = pre_checkout_query.invoice_payload
     
     logger.info(f"Pre-checkout query from user {user_id}: {payload}")
-    
-    # Валидация формата payload
+
     try:
         parts = payload.split("_")
         if len(parts) != 3:
             raise ValueError(f"Invalid payload format: expected 3 parts, got {len(parts)}")
-        
+
         prefix, subscription_type, user_id_from_payload = parts
-        
-        # Проверка префикса
+
         if prefix != "premium":
             raise ValueError(f"Invalid payload prefix: {prefix}")
-        
-        # Проверка subscription type
+
         valid_types = ["1_month", "3_months", "6_months", "12_months"]
         if subscription_type not in valid_types:
             raise ValueError(f"Invalid subscription type: {subscription_type}")
-        
-        # Проверка user_id
+
         user_id_from_payload = int(user_id_from_payload)
         if user_id_from_payload != user_id:
             logger.warning(
@@ -265,8 +249,8 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
                 error_message="Ошибка безопасности: несоответствие пользователя"
             )
             return
-        
-        # Проверка цены (защита от манипуляций)
+
+        # SECURITY: Проверка цены (защита от манипуляций)
         expected_price = SUBSCRIPTION_PRICES.get(subscription_type)
         if expected_price and pre_checkout_query.total_amount != expected_price:
             logger.error(
@@ -278,8 +262,7 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
                 error_message="Ошибка: несоответствие цены"
             )
             return
-        
-        # Все проверки пройдены
+
         logger.info(f"Pre-checkout validation passed for user {user_id}")
         await pre_checkout_query.answer(ok=True)
         
@@ -311,8 +294,7 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
         f"payload={payment.invoice_payload}, "
         f"provider_charge_id={payment.provider_payment_charge_id}"
     )
-    
-    # Извлекаем тип подписки из payload
+
     try:
         payload_parts = payment.invoice_payload.split("_", 2)
         subscription_type = payload_parts[1]  # "1_month", "3_months", etc.
@@ -341,12 +323,9 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
         )
         await state.clear()
         return
-    
+
     try:
-        # Получаем JWT токен для безопасного вызова API
         token = await get_token(client, user_id)
-        
-        # Активируем подписку через API с JWT авторизацией
         response = await make_api_request(
             client,
             "post",
@@ -371,13 +350,12 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
                 f"• Доступ к платным уровням отношений\n\n"
                 f"Спасибо за поддержку! ❤️"
             )
-            
+
+
             await message.answer(success_message, parse_mode='MarkdownV2')
-            
+
             # AUDIT LOG: Успешная активация
             logger.info(f"Premium activated successfully for user {user_id}, duration: {days} days")
-            
-            # Очищаем FSM состояние
             await state.clear()
             
         else:
@@ -403,5 +381,4 @@ async def successful_payment_handler(message: types.Message, client: httpx.Async
             f"Обратитесь в поддержку с номером транзакции: {payment.telegram_payment_charge_id}"
         )
     finally:
-        # Всегда очищаем состояние после обработки платежа
         await state.clear()

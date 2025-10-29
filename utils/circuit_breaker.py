@@ -19,9 +19,9 @@ T = TypeVar('T')
 
 class CircuitState(Enum):
     """Состояния Circuit Breaker."""
-    CLOSED = "CLOSED"        # Нормальная работа
-    OPEN = "OPEN"            # Сервис недоступен, запросы блокируются
-    HALF_OPEN = "HALF_OPEN"  # Тестирование восстановления
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    HALF_OPEN = "HALF_OPEN"
 
 
 class CircuitBreakerError(Exception):
@@ -56,7 +56,7 @@ class CircuitBreaker(Generic[T]):
     ):
         """
         Инициализация Circuit Breaker.
-        
+
         Args:
             name: Имя circuit breaker для логирования
             failure_threshold: Количество сбоев для открытия circuit
@@ -69,15 +69,13 @@ class CircuitBreaker(Generic[T]):
         self.recovery_timeout = recovery_timeout
         self.expected_exception = expected_exception
         self.success_threshold = success_threshold
-        
-        # Состояние
+
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.success_count = 0
         self.last_failure_time: datetime | None = None
         self.last_attempt_time: datetime | None = None
-        
-        # Статистика
+
         self.total_calls = 0
         self.total_failures = 0
         self.total_successes = 0
@@ -98,28 +96,24 @@ class CircuitBreaker(Generic[T]):
         """Обрабатывает успешный вызов."""
         self.total_successes += 1
         self.failure_count = 0
-        
+
         if self.state == CircuitState.HALF_OPEN:
             self.success_count += 1
             logger.info(
                 f"🟡 {self.name} Circuit Breaker: HALF_OPEN успех "
                 f"{self.success_count}/{self.success_threshold}"
             )
-            
+
             if self.success_count >= self.success_threshold:
                 self._close_circuit()
-        elif self.state == CircuitState.CLOSED:
-            # Уже закрыт, все хорошо
-            pass
     
     def _on_failure(self, exception: Exception):
         """Обрабатывает неудачный вызов."""
         self.total_failures += 1
         self.failure_count += 1
         self.last_failure_time = datetime.now()
-        
+
         if self.state == CircuitState.HALF_OPEN:
-            # В HALF_OPEN даже одна ошибка возвращает в OPEN
             self._open_circuit()
             logger.warning(
                 f"🔴 {self.name} Circuit Breaker: HALF_OPEN → OPEN (тест провален)"
@@ -158,10 +152,10 @@ class CircuitBreaker(Generic[T]):
     def call(self, func: Callable[..., T]) -> Callable[..., T]:
         """
         Декоратор для оборачивания функции в circuit breaker.
-        
+
         Args:
             func: Async функция для защиты
-            
+
         Returns:
             Обернутая функция
         """
@@ -169,8 +163,7 @@ class CircuitBreaker(Generic[T]):
         async def wrapper(*args, **kwargs) -> T:
             self.total_calls += 1
             self.last_attempt_time = datetime.now()
-            
-            # Проверяем состояние circuit
+
             if self.state == CircuitState.OPEN:
                 if self._should_attempt_reset():
                     self._half_open_circuit()
@@ -180,8 +173,7 @@ class CircuitBreaker(Generic[T]):
                         f"{self.name} Circuit Breaker открыт. "
                         f"Повтор через {self.recovery_timeout}s"
                     )
-            
-            # Пытаемся выполнить функцию
+
             try:
                 result = await func(*args, **kwargs)
                 self._on_success()
@@ -190,10 +182,9 @@ class CircuitBreaker(Generic[T]):
                 self._on_failure(e)
                 raise
             except Exception as e:
-                # Неожиданное исключение - не считаем сбоем circuit breaker
                 logger.error(f"Неожиданная ошибка в {self.name}: {e}")
                 raise
-        
+
         return wrapper
     
     def get_state(self) -> str:
@@ -203,7 +194,7 @@ class CircuitBreaker(Generic[T]):
     def get_stats(self) -> dict[str, Any]:
         """
         Возвращает статистику работы circuit breaker.
-        
+
         Returns:
             dict: Статистика (state, failure_count, total_calls, etc.)
         """
@@ -240,13 +231,12 @@ class CircuitBreaker(Generic[T]):
         self.last_attempt_time = None
 
 
-# Готовые экземпляры для разных сервисов
 gemini_circuit_breaker = CircuitBreaker(
     name="Gemini API",
-    failure_threshold=5,      # 5 сбоев подряд
-    recovery_timeout=60,      # Ждем 60 секунд перед повтором
-    expected_exception=Exception,  # Ловим все ошибки API
-    success_threshold=2       # 2 успеха в HALF_OPEN для восстановления
+    failure_threshold=5,
+    recovery_timeout=60,
+    expected_exception=Exception,
+    success_threshold=2
 )
 
 
@@ -254,5 +244,4 @@ def get_all_circuit_breakers() -> list[CircuitBreaker]:
     """Возвращает список всех circuit breakers для мониторинга."""
     return [
         gemini_circuit_breaker,
-        # Добавляйте новые circuit breakers здесь
     ]

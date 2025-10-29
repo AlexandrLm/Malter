@@ -44,7 +44,8 @@ async def get_token(client: httpx.AsyncClient, user_id: int) -> str:
     """
     Получает JWT токен для пользователя.
 
-    IMPORTANT: Использует timeout 10 секунд для быстрой авторизации.
+    SECURITY: Использует timeout 10 секунд для быстрой авторизации.
+    Авторизация должна быть быстрой, если дольше - что-то не так.
 
     Args:
         client: HTTP клиент для запросов
@@ -59,8 +60,6 @@ async def get_token(client: httpx.AsyncClient, user_id: int) -> str:
         httpx.TimeoutException: При превышении timeout (10s)
     """
     try:
-        # SECURITY: Устанавливаем короткий timeout для token refresh (10s)
-        # Авторизация должна быть быстрой, если дольше - что-то не так
         response = await client.post(
             f"{API_BASE_URL}/auth",
             json={"user_id": user_id},
@@ -87,7 +86,8 @@ async def make_api_request(
     """
     Централизованная функция для выполнения запросов к API с поддержкой JWT.
 
-    IMPORTANT: Всегда устанавливает timeout для предотвращения зависания запросов.
+    SECURITY: Всегда устанавливает timeout для предотвращения зависания запросов.
+    Если timeout не передан явно, используем дефолтный 30 секунд.
 
     Args:
         client: HTTP клиент для запросов
@@ -112,8 +112,6 @@ async def make_api_request(
         headers["Authorization"] = f"Bearer {token}"
         kwargs["headers"] = headers
 
-    # SECURITY: Гарантируем что timeout установлен для предотвращения зависания
-    # Если timeout не передан явно, используем дефолтный 30 секунд
     if "timeout" not in kwargs:
         kwargs["timeout"] = 30.0
         logger.debug(f"Using default timeout 30s for {endpoint}")

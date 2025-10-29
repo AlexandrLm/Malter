@@ -14,15 +14,14 @@ async def check_for_level_up(user_id: int) -> str | None:
 
     current_level = profile.relationship_level
     if current_level >= max(RELATIONSHIP_LEVELS_CONFIG.keys()):
-        return None  # Пользователь уже на максимальном уровне
+        return None
 
     next_level = current_level + 1
     next_level_config = RELATIONSHIP_LEVELS_CONFIG[next_level]
     current_level_config = RELATIONSHIP_LEVELS_CONFIG[current_level]
 
-    # Проверка критериев для повышения уровня
     if next_level_config['is_paid'] and profile.subscription_plan != 'premium':
-        return "offer_subscription" # Предложить подписку
+        return "offer_subscription"
 
     if profile.relationship_score < next_level_config['min_score']:
         return None
@@ -30,7 +29,6 @@ async def check_for_level_up(user_id: int) -> str | None:
     if (datetime.now(timezone.utc) - profile.level_unlocked_at).days < current_level_config['min_days']:
         return None
 
-    # Повышение уровня
     await create_or_update_profile(user_id, {
         "relationship_level": next_level,
         "level_unlocked_at": datetime.now(timezone.utc)

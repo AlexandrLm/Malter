@@ -7,34 +7,20 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Добавляем корневую директорию проекта в sys.path
-# чтобы Alembic мог найти наши модули (config, server.models)
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 
 from config import DATABASE_URL
 from server.models import Base
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
 config = context.config
 
-# Устанавливаем URL для подключения к БД из нашего конфига
 config.set_main_option('sqlalchemy.url', DATABASE_URL)
 
-# Проверяем, что config_file_name существует перед использованием
 if config.config_file_name is not None and os.path.exists(config.config_file_name):
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
 target_metadata = Base.metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
-
-# Получаем значения из переменных окружения
 postgres_user = os.getenv('POSTGRES_USER')
 postgres_password = os.getenv('POSTGRES_PASSWORD')
 postgres_db = os.getenv('POSTGRES_DB')
@@ -73,7 +59,7 @@ def do_run_migrations(connection):
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        render_as_batch=True  # Включаем batch mode для поддержки SQLite
+        render_as_batch=True
     )
 
     with context.begin_transaction():

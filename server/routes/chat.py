@@ -19,26 +19,16 @@ from server.api_helpers import (
 from server.database import get_unsummarized_messages
 from server.ai import generate_ai_response
 
-# ============================================================================
-# SETUP
-# ============================================================================
-
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 limiter = Limiter(key_func=get_limiter_key)
 
 logger = logging.getLogger(__name__)
 
-# Prometheus metrics
 CHAT_REQUESTS = Counter('chat_requests_total', 'Total number of chat requests')
 CHAT_REQUESTS_DURATION = Histogram('chat_requests_duration_seconds', 'Duration of chat requests processing')
 AI_RESPONSE_DURATION = Histogram('ai_response_duration_seconds', 'Duration of AI response generation')
 TTS_GENERATION_DURATION = Histogram('tts_generation_duration_seconds', 'Duration of TTS generation')
 VOICE_MESSAGES_GENERATED = Counter('voice_messages_generated_total', 'Total number of voice messages generated')
-
-
-# ============================================================================
-# CHAT ENDPOINTS
-# ============================================================================
 
 @router.post(
     "/chat",
@@ -73,7 +63,6 @@ async def chat_handler(
     logger.debug(f"Chat request from user {user_id}: {chat.message[:50]}...")
 
     try:
-        # Check message limits
         limit_check = await check_message_limits(user_id)
         if not limit_check["allowed"]:
             logger.warning(f"User {user_id} hit message limit: {limit_check['message']}")
@@ -83,7 +72,6 @@ async def chat_handler(
                 voice_message=None
             )
 
-        # Generate AI response
         ai_start_time = time.time()
         ai_response = await generate_ai_response(
             user_id=user_id,
@@ -96,7 +84,6 @@ async def chat_handler(
         response_text = ai_response['text']
         image_base64 = ai_response.get('image_base64')
 
-        # Handle TTS if premium
         tts_start_time = time.time()
         tts_result = await handle_tts_generation(user_id, response_text)
         if tts_result["voice_data"]:

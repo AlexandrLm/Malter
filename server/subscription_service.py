@@ -33,10 +33,9 @@ class SubscriptionService:
                 "daily_count": 0,
                 "daily_limit": 50
             }
-        
-        # Проверяем истечение подписки
+
         await check_subscription_expiry(user_id)
-        profile = await get_profile(user_id)  # Обновляем профиль
+        profile = await get_profile(user_id)
         
         is_premium = (profile.subscription_plan == 'premium' and 
                      profile.subscription_expires and 
@@ -75,14 +74,12 @@ class SubscriptionService:
                 "reason": "profile_not_found",
                 "message": "Профиль не найден. Используйте /start для создания профиля."
             }
-        
-        # Проверяем истечение подписки
+
         await check_subscription_expiry(user_id)
         profile = await get_profile(user_id)
-        
-        # Премиум пользователи не имеют ограничений
-        if (profile.subscription_plan == 'premium' and 
-            profile.subscription_expires and 
+
+        if (profile.subscription_plan == 'premium' and
+            profile.subscription_expires and
             profile.subscription_expires > datetime.now(timezone.utc)):
             return {
                 "allowed": True,
@@ -90,8 +87,7 @@ class SubscriptionService:
                 "message": "premium",
                 "subscription_info": await SubscriptionService.get_subscription_info(user_id)
             }
-        
-        # Проверяем лимит для бесплатных пользователей
+
         if profile.daily_message_count >= DAILY_MESSAGE_LIMIT:
             return {
                 "allowed": False,
