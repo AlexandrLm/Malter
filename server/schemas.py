@@ -5,17 +5,21 @@ from datetime import datetime
 class ChatRequest(BaseModel):
     """
     Модель запроса для обработки чат-сообщения.
-    
+
     Attributes:
         user_id (int | None): Уникальный идентификатор пользователя (опционально, из токена).
-        message (str): Текст сообщения пользователя.
+        message (str | None): Текст сообщения пользователя (может быть None для image-only сообщений).
         timestamp (datetime): Временная метка сообщения.
         image_data (str | None): Данные изображения в формате base64 (опционально).
+        message_type (str | None): Тип сообщения: "text", "image_only", "image_with_caption" (опционально).
+        has_image (bool | None): Флаг наличия изображения (опционально).
     """
     user_id: int | None = None
-    message: str
+    message: str | None = None
     timestamp: datetime
     image_data: str | None = None
+    message_type: str | None = None
+    has_image: bool | None = None
 
 
 class LevelUpInfo(BaseModel):

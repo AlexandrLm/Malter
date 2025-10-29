@@ -625,24 +625,29 @@ async def handle_final_response(response: Any, user_id: int, candidate: Any) -> 
     return final_response
 
 
-async def generate_ai_response(user_id: int, user_message: str, timestamp: datetime, image_data: str | None = None) -> dict[str, str | None]:
+async def generate_ai_response(user_id: int, user_message: str | None, timestamp: datetime, image_data: str | None = None) -> dict[str, str | None]:
     """
     Генерирует ответ AI с использованием `generate_content`, сохраняя и извлекая историю чата из БД.
     Поддерживает обработку изображений.
-    
+
     Использует класс AIResponseGenerator для лучшей организации кода.
-    
+
     Args:
         user_id: ID пользователя
-        user_message: Сообщение пользователя
+        user_message: Сообщение пользователя (может быть None для image-only сообщений)
         timestamp: Временная метка сообщения
         image_data: Опциональные данные изображения в base64
-        
+
     Returns:
         Dict с ключами 'text' и 'image_base64'
     """
-    logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
-    
+    # Обрабатываем случай когда отправлено только изображение без текста
+    if not user_message and image_data:
+        user_message = "[Изображение]"
+        logging.info(f"Получено изображение от пользователя {user_id} в {timestamp} без текста")
+    else:
+        logging.info(f"Получено сообщение от пользователя {user_id} в {timestamp}: '{user_message}'")
+
     generator = AIResponseGenerator(user_id, user_message, timestamp, image_data)
     return await generator.generate()
 

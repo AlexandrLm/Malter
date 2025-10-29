@@ -39,13 +39,23 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
     # Текст сообщения (или подпись к фото)
     text = message.text or message.caption or ""
 
+    # Определяем тип сообщения для аналитики и логики
+    if image_data_b64 and not text:
+        message_type = "image_only"
+    elif image_data_b64 and text:
+        message_type = "image_with_caption"
+    else:
+        message_type = "text"
+
     # Получаем JWT токен для пользователя
     token = await get_token(client, user_id)
-    
+
     payload = {
-        "message": text,
+        "message": text if text else None,  # null вместо пустой строки
         "timestamp": message.date.isoformat(),
-        "image_data": image_data_b64
+        "image_data": image_data_b64,
+        "message_type": message_type,  # Новое поле для типа сообщения
+        "has_image": bool(image_data_b64)  # Флаг наличия изображения
     }
 
     try:
