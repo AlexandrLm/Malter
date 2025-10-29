@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime
+from datetime import datetime, timezone
 from server.database import get_profile, create_or_update_profile
 from server.relationship_config import RELATIONSHIP_LEVELS_CONFIG
 
@@ -27,13 +27,13 @@ async def check_for_level_up(user_id: int) -> str | None:
     if profile.relationship_score < next_level_config['min_score']:
         return None
 
-    if (datetime.now() - profile.level_unlocked_at).days < current_level_config['min_days']:
+    if (datetime.now(timezone.utc) - profile.level_unlocked_at).days < current_level_config['min_days']:
         return None
 
     # Повышение уровня
     await create_or_update_profile(user_id, {
         "relationship_level": next_level,
-        "level_unlocked_at": datetime.now()
+        "level_unlocked_at": datetime.now(timezone.utc)
     })
 
     return next_level_config['name']

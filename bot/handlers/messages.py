@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Optional
 
@@ -38,25 +39,60 @@ async def handle_message(message: types.Message, state: FSMContext, client: http
     # Текст сообщения (или подпись к фото)
     text = message.text or message.caption or ""
 
+    # Определяем тип сообщения для аналитики и логики
+    if image_data_b64 and not text:
+        message_type = "image_only"
+    elif image_data_b64 and text:
+        message_type = "image_with_caption"
+    else:
+        message_type = "text"
+
     # Получаем JWT токен для пользователя
     token = await get_token(client, user_id)
-    
+
     payload = {
-        "message": text,
+        "message": text if text else None,  # null вместо пустой строки
         "timestamp": message.date.isoformat(),
-        "image_data": image_data_b64
+        "image_data": image_data_b64,
+        "message_type": message_type,  # Новое поле для типа сообщения
+        "has_image": bool(image_data_b64)  # Флаг наличия изображения
     }
 
-    response = await make_api_request(
-        client,
-        "post",
-        "/chat",
-        user_id=user_id,
-        token=token,
-        json=payload,
-        timeout=180.0
-    )
+    try:
+        response = await make_api_request(
+            client,
+            "post",
+            "/chat",
+            user_id=user_id,
+            token=token,
+            json=payload,
+            timeout=180.0
+        )
 
-    data = response.json()
-    
-    await send_response(message, data)
+        # Проверяем HTTP статус
+        response.raise_for_status()
+
+        # Безопасно парсим JSON
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON from API for user {user_id}: {response.text[:200]}")
+            await message.answer("Ой, у меня голова кругом... 😵 Напиши чуть позже?")
+            return
+
+        await send_response(message, data)
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"API HTTP error for user {user_id}: {e.response.status_code} - {e.response.text[:200]}")
+        if e.response.status_code == 429:
+            await message.answer("Похоже, слишком много сообщений сразу 😅 Давай немного передохнём?")
+        elif e.response.status_code >= 500:
+            await message.answer("Прости, что-то пошло не так на моей стороне... 😔 Попробуй позже?")
+        else:
+            await message.answer("Упс, произошла ошибка... 🤔 Попробуй ещё раз?")
+    except httpx.TimeoutException:
+        logger.error(f"API timeout for user {user_id}")
+        await message.answer("Извини, я слишком долго думала... 😴 Попробуй снова?")
+    except Exception as e:
+        logger.error(f"Unexpected error handling message for user {user_id}: {e}", exc_info=True)
+        await message.answer("Что-то пошло не так... 😢 Попробуй написать позже?")

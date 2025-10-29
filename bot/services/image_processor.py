@@ -37,15 +37,20 @@ async def process_image(message: Message) -> Optional[str]:
     
     user_id = message.from_user.id
     
+    photo_bytes = None
+    image_stream = None
+    image = None
+    output_bytes = None
+
     try:
         # Выбираем лучшее качество (последнее в списке)
         photo = message.photo[-1]
-        
+
         # Скачиваем фото в память
         photo_bytes = BytesIO()
         await message.bot.download(photo, destination=photo_bytes)
         photo_bytes.seek(0)
-        
+
         # Проверяем размер сырых данных
         raw_data = photo_bytes.getvalue()
         raw_size = len(raw_data)
@@ -56,56 +61,61 @@ async def process_image(message: Message) -> Optional[str]:
                 "Пожалуйста, отправьте изображение меньшего размера."
             )
             return None
-        
+
         # Валидация и обработка изображения с Pillow
         image_stream = BytesIO(raw_data)
-        
+
         try:
-            image = Image.open(image_stream)
-            # Проверяем, что это валидное изображение
-            image.verify()
-            
+            # Используем context manager для автоматического закрытия
+            with Image.open(image_stream) as img_verify:
+                # Проверяем, что это валидное изображение
+                img_verify.verify()
+
             # Переоткрываем после verify
+            image_stream.close()
             image_stream = BytesIO(raw_data)
-            image = Image.open(image_stream)
-            
-            # Конвертируем в RGB если RGBA/LA/P (для JPEG)
-            if image.mode in ('RGBA', 'LA', 'P'):
-                background = Image.new('RGB', image.size, (255, 255, 255))
-                if image.mode == 'P':
-                    image = image.convert('RGBA')
-                if image.mode == 'RGBA':
-                    background.paste(image, mask=image.split()[-1])
-                else:
-                    background.paste(image)
-                image = background
-            
-            # Изменяем размер если слишком большой
-            image.thumbnail(MAX_IMAGE_DIMENSIONS, Image.Resampling.LANCZOS)
-            
-            # Сохраняем как JPEG с оптимизацией
-            output_bytes = BytesIO()
-            image.save(output_bytes, format='JPEG', quality=JPEG_QUALITY, optimize=True)
-            processed_bytes = output_bytes.getvalue()
-            
-            # Финальная проверка размера после обработки
-            if len(processed_bytes) > MAX_IMAGE_SIZE:
-                logger.warning(
-                    f"Processed image still too large for user {user_id}: "
-                    f"{len(processed_bytes)} bytes"
+
+            with Image.open(image_stream) as image:
+                # Конвертируем в RGB если RGBA/LA/P (для JPEG)
+                if image.mode in ('RGBA', 'LA', 'P'):
+                    background = Image.new('RGB', image.size, (255, 255, 255))
+                    if image.mode == 'P':
+                        image = image.convert('RGBA')
+                    if image.mode == 'RGBA':
+                        background.paste(image, mask=image.split()[-1])
+                    else:
+                        background.paste(image)
+                    image = background
+
+                # Изменяем размер если слишком большой
+                image.thumbnail(MAX_IMAGE_DIMENSIONS, Image.Resampling.LANCZOS)
+
+                # Сохраняем как JPEG с оптимизацией
+                output_bytes = BytesIO()
+                try:
+                    image.save(output_bytes, format='JPEG', quality=JPEG_QUALITY, optimize=True)
+                    processed_bytes = output_bytes.getvalue()
+                finally:
+                    output_bytes.close()
+
+                # Финальная проверка размера после обработки
+                if len(processed_bytes) > MAX_IMAGE_SIZE:
+                    logger.warning(
+                        f"Processed image still too large for user {user_id}: "
+                        f"{len(processed_bytes)} bytes"
+                    )
+                    await message.answer(
+                        "⚠️ Не удалось сжать изображение до допустимого размера. "
+                        "Попробуйте другое изображение."
+                    )
+                    return None
+
+                logger.info(
+                    f"Image processed successfully for user {user_id}: "
+                    f"{len(processed_bytes)} bytes, {image.size} dimensions"
                 )
-                await message.answer(
-                    "⚠️ Не удалось сжать изображение до допустимого размера. "
-                    "Попробуйте другое изображение."
-                )
-                return None
-            
-            logger.info(
-                f"Image processed successfully for user {user_id}: "
-                f"{len(processed_bytes)} bytes, {image.size} dimensions"
-            )
-            return base64.b64encode(processed_bytes).decode('utf-8')
-            
+                return base64.b64encode(processed_bytes).decode('utf-8')
+
         except Exception as pil_error:
             logger.error(f"Pillow validation error for user {user_id}: {pil_error}")
             await message.answer(
@@ -113,10 +123,16 @@ async def process_image(message: Message) -> Optional[str]:
                 "Убедитесь, что это корректный файл изображения."
             )
             return None
-            
+
     except Exception as e:
         logger.error(f"Error processing image for user {user_id}: {e}", exc_info=True)
         await message.answer(
             "⚠️ Произошла ошибка при обработке изображения. Попробуйте еще раз."
         )
         return None
+    finally:
+        # Гарантируем закрытие всех BytesIO объектов
+        if photo_bytes:
+            photo_bytes.close()
+        if image_stream:
+            image_stream.close()

@@ -6,7 +6,7 @@
 """
 
 from datetime import datetime, date, timedelta, timezone
-from sqlalchemy import select, delete, desc, update, func
+from sqlalchemy import select, delete, desc, update, func, asc
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 import json
@@ -17,9 +17,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 from utils.retry_configs import db_retry, redis_retry
 from utils.db_monitoring import setup_query_monitoring, get_query_metrics
+from utils.circuit_breaker import CircuitBreaker
 from config import (
-    DATABASE_URL, 
-    CHAT_HISTORY_LIMIT, 
+    DATABASE_URL,
     REDIS_CLIENT,
     CACHE_TTL_SECONDS,
     REDIS_RETRY_ATTEMPTS,
@@ -50,108 +50,71 @@ def get_chat_messages_cache_key(user_id: int) -> str:
     return f"chat_messages:{user_id}"
 
 # --- Circuit Breaker для Redis ---
-class RedisCircuitBreaker:
-    """
-    Circuit Breaker паттерн для защиты от cascade failures при проблемах с Redis.
-    
-    States:
-    - CLOSED: Нормальная работа, все запросы идут к Redis
-    - OPEN: Redis недоступен, запросы сразу возвращают None (30 секунд)
-    - HALF_OPEN: Пробуем восстановить соединение (1 тестовый запрос)
-    """
-    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.failure_count = 0
-        self.last_failure_time: datetime | None = None
-        self.is_open = False
-    
-    def record_success(self):
-        """Запрос успешен - сбрасываем счетчик."""
-        self.failure_count = 0
-        self.is_open = False
-    
-    def record_failure(self):
-        """Запрос провален - увеличиваем счетчик."""
-        self.failure_count += 1
-        self.last_failure_time = datetime.now()
-        
-        if self.failure_count >= self.failure_threshold:
-            self.is_open = True
-            logging.warning(f"Redis Circuit Breaker ОТКРЫТ после {self.failure_count} неудач")
-    
-    def can_attempt(self) -> bool:
-        """Проверяет, можно ли попытаться подключиться к Redis."""
-        if not self.is_open:
-            return True
-        
-        # Circuit breaker открыт - проверяем, прошло ли время восстановления
-        if self.last_failure_time:
-            time_since_failure = (datetime.now() - self.last_failure_time).total_seconds()
-            if time_since_failure >= self.recovery_timeout:
-                logging.info("Redis Circuit Breaker пробует восстановление (HALF-OPEN)")
-                self.is_open = False  # Переходим в HALF-OPEN
-                self.failure_count = self.failure_threshold - 1  # Еще 1 неудача = снова OPEN
-                return True
-        
-        return False
-    
-    def get_state(self) -> str:
-        """Возвращает текущее состояние circuit breaker."""
-        if not self.is_open:
-            return "CLOSED" if self.failure_count == 0 else "HALF_OPEN"
-        return "OPEN"
+# Используем правильную реализацию из utils/circuit_breaker.py
+redis_circuit_breaker = CircuitBreaker(
+    name="Redis",
+    failure_threshold=3,
+    recovery_timeout=30,
+    expected_exception=RedisError,
+    success_threshold=2
+)
 
-redis_circuit_breaker = RedisCircuitBreaker()
-
-@redis_retry
 async def _safe_redis_get(key: str) -> str | None:
     """
     Безопасное чтение из Redis с retry механизмом и Circuit Breaker.
     При неудаче возвращает None вместо exception.
     """
-    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
+    if not REDIS_CLIENT:
         return None
+
+    @redis_circuit_breaker.call
+    @redis_retry
+    async def _do_get():
+        return await REDIS_CLIENT.get(key)
+
     try:
-        result = await REDIS_CLIENT.get(key)
-        redis_circuit_breaker.record_success()
-        return result
+        return await _do_get()
     except Exception as e:
-        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis GET failed for key {key}: {e}")
         return None
 
-@redis_retry
 async def _safe_redis_set(key: str, value: str, ex: int) -> bool:
     """
     Безопасная запись в Redis с retry механизмом и Circuit Breaker.
     Возвращает True при успехе, False при неудаче.
     """
-    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
+    if not REDIS_CLIENT:
         return False
-    try:
+
+    @redis_circuit_breaker.call
+    @redis_retry
+    async def _do_set():
         await REDIS_CLIENT.set(key, value, ex=ex)
-        redis_circuit_breaker.record_success()
         return True
+
+    try:
+        return await _do_set()
     except Exception as e:
-        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis SET failed for key {key}: {e}")
         return False
 
-@redis_retry
 async def _safe_redis_delete(key: str) -> bool:
     """
     Безопасное удаление из Redis с retry механизмом и Circuit Breaker.
     Возвращает True при успехе, False при неудаче.
     """
-    if not REDIS_CLIENT or not redis_circuit_breaker.can_attempt():
+    if not REDIS_CLIENT:
         return False
-    try:
+
+    @redis_circuit_breaker.call
+    @redis_retry
+    async def _do_delete():
         await REDIS_CLIENT.delete(key)
-        redis_circuit_breaker.record_success()
         return True
+
+    try:
+        return await _do_delete()
     except Exception as e:
-        redis_circuit_breaker.record_failure()
         logging.warning(f"Redis DELETE failed for key {key}: {e}")
         return False
 
@@ -222,18 +185,25 @@ async def get_profile(user_id: int) -> UserProfile | None:
 async def create_or_update_profile(user_id: int, data: dict):
     """
     Атомарно создает или обновляет профиль и инвалидирует кэш.
-    
+
     Args:
         user_id (int): Уникальный идентификатор пользователя.
         data (dict): Данные профиля для создания или обновления.
     """
+    # Инвалидируем кэш ПЕРЕД обновлением БД для предотвращения race condition
+    # Это гарантирует, что concurrent reads не получат stale данные
+    cache_key = get_profile_cache_key(user_id)
+    deleted = await _safe_redis_delete(cache_key)
+    if not deleted:
+        logging.warning(f"Не удалось инвалидировать кэш профиля для user {user_id}. Данные могут быть устаревшими.")
+
     try:
         # Шифруем поле name, если оно есть, но оставляем ключ как 'name' для соответствия колонке БД
         db_data = data.copy()
         if 'name' in db_data:
             from utils.encryption import encrypt_field
             db_data['name'] = encrypt_field(db_data['name'])
-        
+
         async with async_session_factory() as session:
             # Используем Core-style insert через __table__ чтобы избежать проблем с @property
             stmt = insert(UserProfile.__table__).values(user_id=user_id, **db_data)
@@ -243,12 +213,6 @@ async def create_or_update_profile(user_id: int, data: dict):
     except Exception as e:
         logging.error(f"Ошибка при создании/обновлении профиля в БД для пользователя {user_id}: {e}")
         raise
-
-    # Инвалидируем кэш (критично для консистентности данных)
-    cache_key = get_profile_cache_key(user_id)
-    deleted = await _safe_redis_delete(cache_key)
-    if not deleted:
-        logging.warning(f"Не удалось инвалидировать кэш профиля для user {user_id}. Данные могут быть устаревшими.")
 
 async def delete_profile(user_id: int):
     """Удаляет профиль и инвалидирует кэш.
@@ -313,9 +277,15 @@ async def delete_summary(user_id: int):
         logging.error(f"Ошибка БД при удалении сводки для пользователя {user_id}: {e}", exc_info=True)
         raise
 
-async def save_long_term_memory(user_id: int, fact: str, category: str):
+async def save_long_term_memory(user_id: int, fact: str, category: str, intensity: int = 5):
     """
     Сохраняет новый факт, только если точно такого же факта еще нет в базе.
+    
+    Args:
+        user_id: ID пользователя
+        fact: Текст факта или эмоции
+        category: Категория ('preferences', 'memories', 'work', 'emotion', и т.д.)
+        intensity: Интенсивность (1-10), используется для категории 'emotion'
     """
     try:
         async with async_session_factory() as session:
@@ -333,11 +303,12 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
                 return {"status": "skipped", "reason": "duplicate fact"}
 
             # 3. Если факта нет, сохраняем его
-            logging.debug(f"Сохранение нового факта для user_id {user_id}")
+            logging.debug(f"Сохранение нового факта для user_id {user_id} (category: {category}, intensity: {intensity})")
             memory = LongTermMemory(
                 user_id=user_id,
                 fact=fact,
-                category=category
+                category=category,
+                intensity=intensity
             )
             session.add(memory)
             await session.commit()
@@ -345,6 +316,140 @@ async def save_long_term_memory(user_id: int, fact: str, category: str):
     except SQLAlchemyError as e:
         logging.error(f"Ошибка БД при сохранении факта для пользователя {user_id}: {e}", exc_info=True)
         return {"status": "error", "reason": "database_error"}
+
+
+async def save_emotional_memory(user_id: int, emotion: str, intensity: int, context: str):
+    """
+    Сохраняет эмоциональное воспоминание пользователя.
+    Это специализированная функция для категории 'emotion' с обязательной интенсивностью.
+
+    Если количество эмоциональных воспоминаний превышает лимит, удаляются самые старые
+    с низкой интенсивностью.
+
+    Args:
+        user_id: ID пользователя
+        emotion: Название эмоции (happy, sad, angry, excited, anxious, и т.д.)
+        intensity: Интенсивность эмоции от 1 до 10
+        context: Контекст/триггер эмоции
+
+    Returns:
+        dict: Статус сохранения
+    """
+    from config import MAX_EMOTIONAL_MEMORIES_PER_USER
+
+    # Валидация intensity
+    if not isinstance(intensity, int) or not (1 <= intensity <= 10):
+        logging.warning(f"Invalid intensity {intensity} for user {user_id}, clamping to range 1-10")
+        intensity = max(1, min(10, int(intensity)))
+
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                # Проверяем текущее количество эмоциональных воспоминаний
+                count_result = await session.execute(
+                    select(func.count(LongTermMemory.id))
+                    .where(
+                        LongTermMemory.user_id == user_id,
+                        LongTermMemory.category == "emotion"
+                    )
+                )
+                current_count = count_result.scalar()
+
+                # Если превышен лимит, удаляем самые старые с низкой интенсивностью
+                if current_count >= MAX_EMOTIONAL_MEMORIES_PER_USER:
+                    # Удаляем самые старые воспоминания с минимальной интенсивностью
+                    memories_to_delete = current_count - MAX_EMOTIONAL_MEMORIES_PER_USER + 1
+
+                    # Находим IDs воспоминаний для удаления (сортируем по intensity ASC, затем по timestamp ASC)
+                    old_memories = await session.execute(
+                        select(LongTermMemory.id)
+                        .where(
+                            LongTermMemory.user_id == user_id,
+                            LongTermMemory.category == "emotion"
+                        )
+                        .order_by(
+                            asc(LongTermMemory.intensity),
+                            asc(LongTermMemory.timestamp)
+                        )
+                        .limit(memories_to_delete)
+                    )
+                    ids_to_delete = [row[0] for row in old_memories.all()]
+
+                    if ids_to_delete:
+                        await session.execute(
+                            delete(LongTermMemory).where(LongTermMemory.id.in_(ids_to_delete))
+                        )
+                        logging.info(
+                            f"Удалено {len(ids_to_delete)} старых эмоциональных воспоминаний "
+                            f"для user {user_id} (превышен лимит {MAX_EMOTIONAL_MEMORIES_PER_USER})"
+                        )
+
+    except Exception as e:
+        logging.error(f"Ошибка при проверке лимита эмоциональных воспоминаний для user {user_id}: {e}")
+
+    # Формируем факт в виде: "Emotion: happy (context: получил хорошие новости)"
+    fact = f"Emotion: {emotion} (context: {context})"
+
+    return await save_long_term_memory(user_id, fact, category="emotion", intensity=intensity)
+
+
+async def get_emotional_memories(user_id: int, limit: int = 5) -> list[dict]:
+    """
+    Получает последние эмоциональные воспоминания пользователя, отсортированные по интенсивности и времени.
+    
+    Args:
+        user_id: ID пользователя
+        limit: Максимальное количество воспоминаний (по умолчанию 5)
+        
+    Returns:
+        list[dict]: Список эмоциональных воспоминаний с полями emotion, intensity, context, timestamp
+    """
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(LongTermMemory)
+                .where(
+                    LongTermMemory.user_id == user_id,
+                    LongTermMemory.category == "emotion"
+                )
+                .order_by(
+                    desc(LongTermMemory.intensity),  # Сначала более интенсивные
+                    desc(LongTermMemory.timestamp)   # Затем более свежие
+                )
+                .limit(limit)
+            )
+            memories = result.scalars().all()
+            
+            if not memories:
+                return []
+            
+            # Парсим и форматируем результат
+            formatted_memories = []
+            for mem in memories:
+                # Парсим факт вида "Emotion: happy (context: получил хорошие новости)"
+                import re
+                match = re.match(r"Emotion: (\w+) \(context: (.+)\)", mem.fact)
+                if match:
+                    emotion, context = match.groups()
+                    formatted_memories.append({
+                        "emotion": emotion,
+                        "intensity": mem.intensity,
+                        "context": context,
+                        "timestamp": str(mem.timestamp)
+                    })
+                else:
+                    # Fallback если формат не совпадает
+                    formatted_memories.append({
+                        "emotion": "unknown",
+                        "intensity": mem.intensity,
+                        "context": mem.fact,
+                        "timestamp": str(mem.timestamp)
+                    })
+            
+            return formatted_memories
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении эмоциональных воспоминаний для пользователя {user_id}: {e}", exc_info=True)
+        return []
 
 def sanitize_search_query(query: str) -> str:
     """
@@ -421,10 +526,12 @@ async def get_long_term_memories(user_id: int, query: str) -> dict:
             # Fallback на ILIKE если полнотекстовый поиск не дал результатов
             if not memories and sanitized_query:
                 logging.debug(f"Full-text search дал 0 результатов, пробуем ILIKE fallback для user_id {user_id}")
+                # Экранируем ILIKE wildcards для безопасности
+                escaped_query = sanitized_query.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
                 result = await session.execute(
                     select(LongTermMemory).where(
                         LongTermMemory.user_id == user_id,
-                        LongTermMemory.fact.ilike(f"%{sanitized_query}%")
+                        LongTermMemory.fact.ilike(f"%{escaped_query}%")
                     ).order_by(desc(LongTermMemory.timestamp)).limit(5)
                 )
                 memories = result.scalars().all()
@@ -522,16 +629,23 @@ async def get_latest_summary(user_id: int) -> ChatSummary | None:
         logging.error(f"Ошибка БД при получении сводки для пользователя {user_id}: {e}", exc_info=True)
         return None
 
-async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
+async def get_unsummarized_messages(user_id: int, limit: int | None = None) -> list[ChatHistory]:
     """
     Извлекает все сообщения пользователя, которые еще не были включены в сводку.
+
+    Args:
+        user_id: ID пользователя
+        limit: Максимальное количество сообщений (необязательно)
+
+    Returns:
+        list[ChatHistory]: Список несуммаризированных сообщений
     """
     try:
         latest_summary = await get_latest_summary(user_id)
         last_message_id = latest_summary.last_message_id if latest_summary else 0
 
         async with async_session_factory() as session:
-            result = await session.execute(
+            query = (
                 select(ChatHistory)
                 .where(
                     ChatHistory.user_id == user_id,
@@ -539,6 +653,12 @@ async def get_unsummarized_messages(user_id: int) -> list[ChatHistory]:
                 )
                 .order_by(ChatHistory.timestamp.asc())
             )
+
+            # Применяем лимит если указан
+            if limit is not None:
+                query = query.limit(limit)
+
+            result = await session.execute(query)
             messages = result.scalars().all()
             return messages
     except SQLAlchemyError as e:
@@ -662,6 +782,56 @@ async def get_all_user_ids() -> list[int]:
         logging.error(f"Ошибка при получении списка всех пользователей: {e}")
         return []
 
+async def get_last_message_time(user_id: int) -> datetime | None:
+    """
+    Получает timestamp последнего сообщения пользователя (от user или от model).
+    
+    Args:
+        user_id (int): Уникальный идентификатор пользователя.
+        
+    Returns:
+        datetime | None: Время последнего сообщения или None если истории нет.
+    """
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(ChatHistory.timestamp)
+                .where(ChatHistory.user_id == user_id)
+                .order_by(ChatHistory.timestamp.desc())
+                .limit(1)
+            )
+            row = result.first()
+            return row[0] if row else None
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении времени последнего сообщения для user {user_id}: {e}")
+        return None
+
+async def get_active_users_for_proactive() -> list[UserProfile]:
+    """
+    Получает список активных пользователей для проактивных сообщений.
+    Фильтры:
+    - Последнее сообщение в течение 7 дней
+    - Имеют настроенный timezone
+    
+    Returns:
+        list[UserProfile]: Список профилей активных пользователей.
+    """
+    try:
+        cutoff_date = date.today() - timedelta(days=7)
+        
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(UserProfile).where(
+                    UserProfile.last_message_date >= cutoff_date,
+                    UserProfile.timezone.isnot(None)  # Только с указанной timezone
+                )
+            )
+            profiles = result.scalars().all()
+            return list(profiles)
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при получении активных пользователей: {e}")
+        return []
+
 async def check_message_limit(user_id: int) -> dict:
     """
     Проверяет лимит сообщений для пользователя.
@@ -729,30 +899,56 @@ async def check_message_limit(user_id: int) -> dict:
 async def check_subscription_expiry(user_id: int) -> bool:
     """
     Проверяет и обновляет статус подписки при истечении.
-    
+    Использует row-level lock для предотвращения race conditions.
+
     Args:
         user_id (int): Уникальный идентификатор пользователя.
-        
+
     Returns:
         bool: True если подписка активна, False если истекла или отсутствует.
     """
-    profile = await get_profile(user_id)
-    if not profile:
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                # Используем row-level lock для атомарности
+                result = await session.execute(
+                    select(UserProfile)
+                    .where(UserProfile.user_id == user_id)
+                    .with_for_update()
+                )
+                profile = result.scalar_one_or_none()
+
+                if not profile:
+                    return False
+
+                # Проверяем истечение подписки
+                if profile.subscription_plan == 'premium' and profile.subscription_expires:
+                    # Правильно обрабатываем timezone
+                    if profile.subscription_expires.tzinfo is None:
+                        expires_aware = profile.subscription_expires.replace(tzinfo=timezone.utc)
+                    else:
+                        expires_aware = profile.subscription_expires
+
+                    if expires_aware < datetime.now(timezone.utc):
+                        # Подписка истекла, переводим на бесплатный план
+                        profile.subscription_plan = 'free'
+                        profile.subscription_expires = None
+                        await session.commit()
+
+                        # Инвалидируем кэш после успешного commit
+                        cache_key = get_profile_cache_key(user_id)
+                        await _safe_redis_delete(cache_key)
+
+                        logging.debug(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
+                        return False
+
+                return profile.subscription_plan == 'premium'
+    except SQLAlchemyError as e:
+        logging.error(f"Ошибка БД при проверке подписки для пользователя {user_id}: {e}", exc_info=True)
         return False
-    
-    if (profile.subscription_plan == 'premium' and 
-        profile.subscription_expires and 
-        profile.subscription_expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)):
-        
-        # Подписка истекла, переводим на бесплатный план
-        await create_or_update_profile(user_id, {
-            "subscription_plan": "free",
-            "subscription_expires": None
-        })
-        logging.debug(f"Подписка пользователя {user_id} истекла, переведен на бесплатный план")
+    except Exception as e:
+        logging.error(f"Неожиданная ошибка при проверке подписки для пользователя {user_id}: {e}", exc_info=True)
         return False
-    
-    return profile.subscription_plan == 'premium'
 
 async def cleanup_old_chat_history(days_to_keep: int = 30) -> int:
     """
@@ -812,7 +1008,12 @@ async def activate_premium_subscription(user_id: int, duration_days: int = 30, c
     if charge_id and len(charge_id) > 255:
         logging.error(f"charge_id слишком длинный для user {user_id}: {len(charge_id)} символов (макс 255)")
         return False
-    
+
+    # SECURITY: Валидация duration_days
+    if not isinstance(duration_days, int) or duration_days < 1 or duration_days > 3650:
+        logging.error(f"Недопустимое значение duration_days для user {user_id}: {duration_days} (допустимо: 1-3650 дней)")
+        return False
+
     try:
         profile = await get_profile(user_id)
         if not profile:

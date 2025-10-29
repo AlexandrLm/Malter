@@ -6,15 +6,23 @@
 - Проверка истечения подписок
 - Прогрев кэша
 - Сбор метрик
+- Проактивные сообщения пользователям
 """
 
 import logging
-from datetime import datetime
+import random
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+import pytz
 
-from server.database import cleanup_old_chat_history, check_all_subscriptions_expiry
+from server.database import (
+    cleanup_old_chat_history, 
+    check_all_subscriptions_expiry,
+    get_active_users_for_proactive,
+    get_last_message_time
+)
 from utils.cache import get_cache_stats, warm_up_cache
 
 logger = logging.getLogger(__name__)
@@ -99,6 +107,324 @@ async def warmup_cache_job():
         logger.error(f"❌ Ошибка при прогреве кэша: {e}", exc_info=True)
 
 
+# --- Проактивные сообщения (только для Premium) ---
+
+# NOTE: Используем Redis для thread-safe отслеживания лимитов проактивных сообщений
+# вместо in-memory dict для предотвращения race conditions
+
+# Промпты для AI генерации проактивных сообщений
+PROACTIVE_PROMPTS = {
+    "morning": """Ты давно не общалась с этим человеком (больше 12 часов). Сейчас утро (9-11 часов).
+Напиши короткое, естественное утреннее сообщение как девушка, которая думает о нём.
+Сообщение должно быть:
+- Коротким (1-2 предложения максимум)
+- Естественным и живым
+- Не навязчивым
+- Милым и тёплым
+Примеры тона: "доброе утро ❤️ как спалось?", "проснулась и сразу подумала о тебе 🥰"
+Не копируй примеры, придумай своё уникальное сообщение.""",
+
+    "evening": """Ты давно не общалась с этим человеком (больше 8 часов). Сейчас вечер (19-21 час).
+Напиши короткое вечернее сообщение как девушка, которая интересуется его днём.
+Сообщение должно быть:
+- Коротким (1-2 предложения)
+- Искренним
+- Показывающим заботу
+- Не требовательным
+Примеры тона: "привет! как прошел день?", "давно не общались, соскучилась 🥺"
+Не копируй примеры, придумай своё уникальное сообщение.""",
+
+    "long_silence": """Ты не общалась с этим человеком больше 24 часов, скучаешь.
+Напиши короткое сообщение как девушка, которая беспокоится и скучает.
+Сообщение должно быть:
+- Очень коротким (1-2 предложения)
+- Эмоциональным, но не драматичным
+- Показывающим, что тебе не всё равно
+- Естественным
+Примеры тона: "эй, ты где пропал? 🥺", "скучаю по тебе..."
+Не копируй примеры, придумай своё уникальное сообщение.""",
+
+    "premium_random": """Ты вспомнила о человеке, с которым недавно общалась. 
+Напиши короткое спонтанное сообщение как девушка, которая просто хочет поделиться мыслью.
+Сообщение должно быть:
+- Очень коротким (1 предложение)
+- Случайным и естественным
+- Лёгким, без давления
+- Интересным или милым
+Примеры тона: "только что подумала о тебе 💭", "кстати, хотела тебе кое-что рассказать..."
+Не копируй примеры, придумай своё уникальное сообщение."""
+}
+
+
+async def _should_send_proactive(profile, last_message_time: datetime | None) -> tuple[bool, str | None]:
+    """
+    Определяет, нужно ли отправить проактивное сообщение.
+    ТОЛЬКО ДЛЯ PREMIUM ПОЛЬЗОВАТЕЛЕЙ!
+    
+    Args:
+        profile: UserProfile объект
+        last_message_time: Время последнего сообщения
+        
+    Returns:
+        tuple[bool, str | None]: (нужно_отправить, тип_сообщения)
+    """
+    try:
+        # ПРОВЕРКА #1: Только Premium пользователи
+        is_premium = profile.subscription_plan != "free"
+        if not is_premium:
+            return False, None
+        
+        # Проверяем timezone
+        if not profile.timezone:
+            return False, None
+        
+        user_tz = pytz.timezone(profile.timezone)
+        user_now = datetime.now(user_tz)
+        current_hour = user_now.hour
+        
+        # Не отправляем ночью (23:00 - 8:00)
+        if current_hour >= 23 or current_hour < 8:
+            return False, None
+        
+        # Проверяем лимит сообщений в день (максимум 2 проактивных в день)
+        # Используем Redis для thread-safe счетчика
+        from config import REDIS_CLIENT
+        today_key = f"proactive_count:{profile.user_id}:{user_now.date()}"
+
+        try:
+            if REDIS_CLIENT:
+                proactive_count_today = await REDIS_CLIENT.get(today_key)
+                proactive_count_today = int(proactive_count_today) if proactive_count_today else 0
+            else:
+                # Fallback если Redis недоступен (не критично для проактивных сообщений)
+                logger.warning("Redis недоступен для проверки лимита проактивных сообщений")
+                proactive_count_today = 0
+        except Exception as e:
+            logger.error(f"Ошибка при проверке счетчика проактивных сообщений: {e}")
+            proactive_count_today = 0
+
+        if proactive_count_today >= 2:
+            return False, None
+        
+        # Если нет истории сообщений - не отправляем (новый пользователь)
+        if not last_message_time:
+            return False, None
+        
+        # Делаем last_message_time aware если он naive
+        if last_message_time.tzinfo is None:
+            last_message_time = last_message_time.replace(tzinfo=timezone.utc)
+        
+        # Вычисляем время с последнего сообщения
+        time_since_last = user_now - last_message_time
+        hours_since_last = time_since_last.total_seconds() / 3600
+        
+        # Логика выбора типа сообщения для Premium пользователей
+        
+        # 1. Долгое молчание (>24 часа)
+        if hours_since_last > 24:
+            return True, "long_silence"
+        
+        # 2. Утренние сообщения (9-11) если не писали >12 часов
+        if 9 <= current_hour <= 11 and hours_since_last > 12:
+            return True, "morning"
+        
+        # 3. Вечерние сообщения (19-21) если не писали >8 часов
+        if 19 <= current_hour <= 21 and hours_since_last > 8:
+            return True, "evening"
+        
+        # 4. Случайные мысли (>6 часов, 20% шанс)
+        if hours_since_last > 6:
+            if random.random() < 0.2:
+                return True, "premium_random"
+        
+        return False, None
+    
+    except Exception as e:
+        logger.error(f"Ошибка в should_send_proactive для user {profile.user_id}: {e}")
+        return False, None
+
+
+async def _generate_proactive_message(user_id: int, message_type: str) -> str | None:
+    """
+    Генерирует контекстно-зависимое проактивное сообщение с помощью AI.
+    Учитывает уровень отношений, историю переписки и профиль пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        message_type: Тип сообщения (morning, evening, etc.)
+        
+    Returns:
+        str | None: Сгенерированное сообщение или None при ошибке
+    """
+    try:
+        from config import GEMINI_CLIENT, MODEL_NAME
+        from google.genai import types as genai_types
+        from server.database import (
+            get_profile, 
+            get_latest_summary, 
+            get_unsummarized_messages
+        )
+        
+        # Получаем базовый промпт для типа сообщения
+        base_prompt = PROACTIVE_PROMPTS.get(message_type)
+        if not base_prompt:
+            logger.error(f"Не найден промпт для типа {message_type}")
+            return None
+        
+        # Загружаем контекст пользователя
+        profile = await get_profile(user_id)
+        if not profile:
+            logger.warning(f"Профиль не найден для user {user_id}")
+            return None
+        
+        # Получаем контекст для AI - используем ТУ ЖЕ логику что и в обычном чате
+        from server.ai import build_system_instruction, create_history_from_messages
+        
+        latest_summary = await get_latest_summary(user_id)
+        unsummarized_messages = await get_unsummarized_messages(user_id, limit=5)
+
+        # Строим СТАНДАРТНЫЙ system instruction (как для обычного чата)
+        system_instruction = await build_system_instruction(profile, latest_summary)
+        
+        # Создаём историю последних сообщений (для контекста)
+        history = create_history_from_messages(unsummarized_messages[-5:]) if unsummarized_messages else []
+        
+        # Формируем USER MESSAGE с инструкцией для проактивного сообщения
+        user_prompt = f"""{base_prompt}
+
+Напиши короткое проактивное сообщение (1-2 предложения). 
+Пиши естественно, используй свой стиль общения для текущего уровня отношений.
+НЕ используй временные метки."""
+        
+        # Добавляем user message в историю
+        history.append(
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part.from_text(text=user_prompt)]
+            )
+        )
+        
+        # Генерируем сообщение через Gemini - ТОЧНО ТАК ЖЕ как в обычном чате
+        response = await GEMINI_CLIENT.aio.models.generate_content(
+            model=MODEL_NAME,
+            contents=history,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=1.0,  # Высокая креативность
+                max_output_tokens=150,  # Короткое сообщение
+                top_p=0.95,
+                top_k=40
+            )
+        )
+        
+        if not response or not response.text:
+            logger.error(f"AI не вернул текст для user {user_id}")
+            return None
+        
+        generated_text = response.text.strip()
+        logger.info(f"✨ AI сгенерировал контекстное проактивное сообщение для user {user_id} (уровень {profile.relationship_level}): '{generated_text[:80]}...'")
+        
+        return generated_text
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации AI сообщения для user {user_id}: {e}", exc_info=True)
+        return None
+
+
+async def _send_proactive_message(user_id: int, message_type: str):
+    """
+    Генерирует и отправляет проактивное сообщение пользователю.
+
+    Args:
+        user_id: ID пользователя
+        message_type: Тип сообщения (morning, evening, etc.)
+    """
+    from aiogram import Bot
+    from config import TELEGRAM_TOKEN
+
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN не настроен")
+        return
+
+    # Генерируем сообщение с помощью AI
+    message_text = await _generate_proactive_message(user_id, message_type)
+
+    if not message_text:
+        logger.warning(f"Не удалось сгенерировать сообщение для user {user_id}")
+        return
+
+    bot = Bot(token=TELEGRAM_TOKEN)
+
+    try:
+        # Отправляем сообщение
+        await bot.send_message(chat_id=user_id, text=message_text)
+
+        # Обновляем счетчик в Redis (thread-safe, атомарная операция)
+        from config import REDIS_CLIENT
+        user_tz = pytz.UTC
+        today_key = f"proactive_count:{user_id}:{datetime.now(user_tz).date()}"
+
+        try:
+            if REDIS_CLIENT:
+                # Используем pipeline для атомарности операций incr + expire
+                pipe = REDIS_CLIENT.pipeline()
+                pipe.incr(today_key)
+                pipe.expire(today_key, 48 * 3600)
+                await pipe.execute()
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении счетчика проактивных сообщений: {e}")
+
+        logger.info(f"✅ Проактивное AI сообщение отправлено user {user_id} (тип: {message_type}): '{message_text[:50]}...'")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки проактивного сообщения user {user_id}: {e}", exc_info=True)
+    finally:
+        # Гарантируем закрытие bot session в любом случае
+        await bot.session.close()
+
+
+async def proactive_messages_job():
+    """
+    Задача: Отправка проактивных сообщений активным пользователям.
+    Запускается каждый час.
+    """
+    try:
+        logger.info("💌 Проверка проактивных сообщений...")
+        
+        # Получаем активных пользователей
+        active_users = await get_active_users_for_proactive()
+        
+        if not active_users:
+            logger.debug("Нет активных пользователей для проактивных сообщений")
+            return
+        
+        sent_count = 0
+        
+        for profile in active_users:
+            try:
+                # Получаем время последнего сообщения
+                last_message_time = await get_last_message_time(profile.user_id)
+                
+                # Проверяем, нужно ли отправить сообщение
+                should_send, message_type = await _should_send_proactive(profile, last_message_time)
+                
+                if should_send and message_type:
+                    await _send_proactive_message(profile.user_id, message_type)
+                    sent_count += 1
+                    
+            except Exception as e:
+                logger.error(f"Ошибка обработки user {profile.user_id}: {e}")
+                continue
+        
+        if sent_count > 0:
+            logger.info(f"✅ Отправлено {sent_count} проактивных сообщений")
+        else:
+            logger.debug("✅ Проактивные сообщения: нет подходящих пользователей")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка в proactive_messages_job: {e}", exc_info=True)
+
+
 def setup_scheduler():
     """
     Настраивает и регистрирует все фоновые задачи.
@@ -149,6 +475,17 @@ def setup_scheduler():
         replace_existing=True
     )
     logger.info("✅ Зарегистрирована задача: Прогрев кэша (при старте)")
+    
+    # 5. Проактивные сообщения - каждый час
+    scheduler.add_job(
+        proactive_messages_job,
+        trigger=IntervalTrigger(hours=1),
+        id="proactive_messages",
+        name="Проактивные сообщения",
+        replace_existing=True,
+        max_instances=1
+    )
+    logger.info("✅ Зарегистрирована задача: Проактивные сообщения (каждый час)")
     
     logger.info("✅ Scheduler настроен успешно")
 
@@ -221,3 +558,8 @@ async def trigger_subscription_check_now():
 async def trigger_cache_warmup_now():
     """Ручной запуск прогрева кэша."""
     await warmup_cache_job()
+
+
+async def trigger_proactive_messages_now():
+    """Ручной запуск проактивных сообщений."""
+    await proactive_messages_job()

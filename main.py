@@ -22,7 +22,7 @@ import config
 # JWT imports
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import Depends, HTTPException, status, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -78,9 +78,46 @@ async def check_message_limits(user_id: int) -> dict:
     limit_check = await check_message_limit(user_id)
     return limit_check
 
-async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
+def strip_voice_markers(text: str) -> str:
+    """
+    Удаляет маркер [VOICE] и описание интонации.
+    Примеры: 
+      '[VOICE]Saying with a smile: "Привет!"' -> 'Привет!'
+      '[VOICE]Say sadly: Ой, Саш...' -> 'Ой, Саш...'
+    """
+    # Удаляем [VOICE]
+    text = text.replace('[VOICE]', '', 1).strip()
+    
+    # Удаляем описание интонации до двоеточия
+    if ':' in text:
+        colon_idx = text.index(':')
+        
+        # Случай 1: с кавычками '[VOICE]Say with smile: "Привет"'
+        if '"' in text:
+            quote_idx = text.index('"', colon_idx)
+            between = text[colon_idx+1:quote_idx]
+            if between.strip() == '':
+                text = text[quote_idx+1:]
+                if text.endswith('"'):
+                    text = text[:-1]
+        # Случай 2: без кавычек '[VOICE]Say sadly: Ой, Саш...'
+        else:
+            # Проверяем что перед двоеточием английские слова (Say, Saying, etc)
+            before_colon = text[:colon_idx].strip()
+            # Если это похоже на инструкцию (начинается с Say), удаляем
+            if before_colon.lower().startswith('say'):
+                text = text[colon_idx+1:].strip()
+    
+    return text.strip()
+
+async def handle_tts_generation(user_id: int, response_text: str) -> dict:
     """
     Handles TTS generation for premium users if [VOICE] marker is present.
+
+    Returns:
+        dict: Dictionary containing:
+            - 'text': The processed text (with or without voice markers)
+            - 'voice_data': Base64-encoded voice message or None
     """
     await check_subscription_expiry(user_id)
     profile = await get_profile(user_id)
@@ -91,15 +128,19 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
     has_voice_marker = response_text.startswith('[VOICE]')
     if has_voice_marker:
         if not is_premium:
-            # Strip [VOICE] for non-premium and skip TTS
-            return response_text.replace('[VOICE]', '', 1).strip(), None
+            # Strip [VOICE] and intonation for non-premium and skip TTS
+            clean_text = strip_voice_markers(response_text)
+            return {
+                "text": clean_text,
+                "voice_data": None
+            }
         else:
             # Proceed with TTS for premium
             text_to_speak = response_text.replace('[VOICE]', '', 1).strip()
-            
+
             # Создаем файловый объект в памяти вместо реального файла
             voice_file_object = io.BytesIO()
-            
+
             # Замеряем время генерации голосового сообщения
             tts_start_time = time.time()
             success = await create_telegram_voice_message(text_to_speak, voice_file_object)
@@ -112,28 +153,39 @@ async def handle_tts_generation(user_id: int, response_text: str) -> str | None:
                 import base64
                 voice_message_data = base64.b64encode(voice_message_bytes).decode('utf-8')
                 VOICE_MESSAGES_GENERATED.inc()
-                return text_to_speak, voice_message_data
+                return {
+                    "text": text_to_speak,
+                    "voice_data": voice_message_data
+                }
             else:
-                # Если генерация не удалась, отправляем текстовый fallback
-                return "Хо хотела записать голосовое, но что-то с телефоном... короче, я так по тебе соскучилась!", None
+                # Если генерация не удалась (например, квота закончилась), отправляем текст без голоса и без интонации
+                logging.warning(f"TTS generation failed for user {user_id}, sending text only")
+                clean_text = strip_voice_markers(response_text)
+                return {
+                    "text": clean_text,
+                    "voice_data": None
+                }
 
-    return response_text, None
+    return {
+        "text": response_text,
+        "voice_data": None
+    }
 
 def assemble_chat_response(response_text: str, voice_data: str | None, image_base64: str | None) -> ChatResponse:
     """
     Assembles the final ChatResponse object.
-    """
-    if voice_data is None:
-        # No voice, use original text
-        pass
-    else:
-        # Voice generated, text is already stripped
-        response_text = voice_data[0] if isinstance(voice_data, tuple) else response_text
-        voice_message_data = voice_data[1] if isinstance(voice_data, tuple) else voice_data
 
+    Args:
+        response_text: The main text response
+        voice_data: Base64-encoded voice message or None
+        image_base64: Base64-encoded image or None
+
+    Returns:
+        ChatResponse: Complete response with text, voice, and optional image
+    """
     return ChatResponse(
         response_text=response_text,
-        voice_message=voice_message_data,
+        voice_message=voice_data,
         image_base64=image_base64
     )
 
@@ -147,9 +199,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES = config.JWT_EXPIRE_MINUTES
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -171,6 +223,29 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     except JWTError as je:
         logging.error(f"JWT Debug Error: {str(je)}")
         raise credentials_exception
+    return user_id
+
+async def verify_admin(user_id: int = Depends(verify_token)) -> int:
+    """
+    Проверяет, что пользователь является администратором.
+
+    Args:
+        user_id: ID пользователя из JWT токена
+
+    Returns:
+        user_id если пользователь admin
+
+    Raises:
+        HTTPException: 403 если пользователь не admin
+    """
+    from config import ADMIN_USER_IDS
+
+    if user_id not in ADMIN_USER_IDS:
+        logging.warning(f"Unauthorized admin access attempt from user {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
     return user_id
 
 # --- Метрики Prometheus ---
@@ -369,10 +444,12 @@ async def chat_handler(
     image_base64 = ai_response.get('image_base64')
 
     # Handle TTS if premium
-    voice_message_data = await handle_tts_generation(user_id, response_text)
+    tts_result = await handle_tts_generation(user_id, response_text)
+    processed_text = tts_result["text"]
+    voice_message_data = tts_result["voice_data"]
 
     CHAT_REQUESTS_DURATION.observe(time.time() - start_time)
-    return assemble_chat_response(response_text, voice_message_data, image_base64)
+    return assemble_chat_response(processed_text, voice_message_data, image_base64)
 
 
 @app.get("/profile/{user_id}", response_model=ProfileData | None, summary="Получение профиля пользователя", description="Возвращает данные профиля пользователя по его ID.")
@@ -499,7 +576,7 @@ async def test_tts(
 @limiter.limit("10/minute")
 async def db_metrics_handler(
     request: Request,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает метрики производительности БД:
@@ -524,7 +601,7 @@ async def db_metrics_handler(
 @limiter.limit("10/minute")
 async def cache_stats_handler(
     request: Request,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статистику кэша:
@@ -550,7 +627,7 @@ async def cache_stats_handler(
 @limiter.limit("10/minute")
 async def scheduler_status_handler(
     request: Request,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статус scheduler и список запланированных задач.
@@ -573,7 +650,7 @@ async def scheduler_status_handler(
 async def cleanup_chat_history_handler(
     request: Request,
     days_to_keep: int = 30,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Удаляет историю чата старше указанного количества дней.
@@ -649,7 +726,7 @@ async def analytics_users_handler(
 async def analytics_messages_handler(
     request: Request,
     days: int = 7,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статистику сообщений:
@@ -729,7 +806,7 @@ async def analytics_features_handler(
 async def analytics_cohort_handler(
     request: Request,
     days: int = 30,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает когортный анализ:
@@ -807,7 +884,7 @@ async def analytics_activity_handler(
 async def analytics_tools_handler(
     request: Request,
     days: int = 7,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_admin)
 ):
     """
     Возвращает статистику использования AI Tools:

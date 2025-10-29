@@ -1,6 +1,5 @@
 import logging
-from collections import defaultdict
-from datetime import datetime, timedelta
+from typing import Optional
 
 import httpx
 from aiogram import F, Router, types
@@ -9,11 +8,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 
-from config import PAYMENT_PROVIDER_TOKEN
+from config import PAYMENT_PROVIDER_TOKEN, PAYMENT_PHOTO_URL
 from ..services.api_client import get_token, make_api_request
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+# Глобальный Redis client (будет инициализирован при старте бота)
+_redis_client: Optional[object] = None
+
+
+def set_redis_client(redis_client):
+    """Устанавливает Redis client для rate limiting."""
+    global _redis_client
+    _redis_client = redis_client
 
 # Цены для разных типов подписок (в копейках)
 SUBSCRIPTION_PRICES = {
@@ -29,38 +37,66 @@ class PaymentStates(StatesGroup):
     pending_payment = State()
 
 # Rate limiting для платежных операций
-payment_attempts = defaultdict(list)  # user_id: [timestamp1, timestamp2, ...]
 MAX_PAYMENT_ATTEMPTS = 3  # Максимум 3 попытки в час
 PAYMENT_RATE_LIMIT_HOURS = 1
 
-def check_payment_rate_limit(user_id: int) -> tuple[bool, int]:
+
+async def check_payment_rate_limit(user_id: int) -> tuple[bool, int]:
     """
-    Проверяет rate limit для платежных операций.
-    
+    Проверяет rate limit для платежных операций используя Redis.
+
     Args:
         user_id: ID пользователя
-        
+
     Returns:
         tuple: (allowed: bool, remaining_attempts: int)
     """
-    now = datetime.now()
-    time_window = timedelta(hours=PAYMENT_RATE_LIMIT_HOURS)
-    
-    # Очищаем старые попытки
-    payment_attempts[user_id] = [
-        t for t in payment_attempts[user_id]
-        if now - t < time_window
-    ]
-    
-    current_attempts = len(payment_attempts[user_id])
-    remaining = MAX_PAYMENT_ATTEMPTS - current_attempts
-    
-    return (remaining > 0, remaining)
+    if not _redis_client:
+        logger.warning("Redis client not available for rate limiting, allowing payment")
+        return (True, MAX_PAYMENT_ATTEMPTS)
+
+    try:
+        key = f"payment_rate:{user_id}"
+
+        # Получаем текущий счетчик
+        current_attempts = await _redis_client.get(key)
+
+        if current_attempts is None:
+            current_attempts = 0
+        else:
+            current_attempts = int(current_attempts)
+
+        remaining = MAX_PAYMENT_ATTEMPTS - current_attempts
+        allowed = remaining > 0
+
+        return (allowed, remaining)
+
+    except Exception as e:
+        logger.error(f"Error checking payment rate limit for user {user_id}: {e}", exc_info=True)
+        # В случае ошибки Redis разрешаем платеж (fail-open для UX)
+        return (True, MAX_PAYMENT_ATTEMPTS)
 
 
-def record_payment_attempt(user_id: int):
-    """Записывает попытку платежа."""
-    payment_attempts[user_id].append(datetime.now())
+async def record_payment_attempt(user_id: int):
+    """Записывает попытку платежа в Redis с автоматическим TTL."""
+    if not _redis_client:
+        logger.warning("Redis client not available for recording payment attempt")
+        return
+
+    try:
+        key = f"payment_rate:{user_id}"
+        ttl_seconds = PAYMENT_RATE_LIMIT_HOURS * 3600
+
+        # Используем pipeline для атомарности
+        pipe = _redis_client.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ttl_seconds)
+        await pipe.execute()
+
+        logger.debug(f"Recorded payment attempt for user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error recording payment attempt for user {user_id}: {e}", exc_info=True)
 
 
 @router.message(Command("buy_premium"))
@@ -73,7 +109,7 @@ async def buy_premium_command(message: types.Message, state: FSMContext):
         return
     
     # Проверяем rate limit
-    allowed, remaining = check_payment_rate_limit(user_id)
+    allowed, remaining = await check_payment_rate_limit(user_id)
     if not allowed:
         logger.warning(f"Payment rate limit exceeded for user {user_id}")
         await message.answer(
@@ -149,7 +185,7 @@ async def handle_subscription_choice(callback: types.CallbackQuery, state: FSMCo
     days = duration_days[subscription_type]
     
     # Записываем попытку платежа
-    record_payment_attempt(user_id)
+    await record_payment_attempt(user_id)
     
     # Переходим в состояние ожидания платежа
     await state.set_state(PaymentStates.pending_payment)
@@ -169,7 +205,7 @@ async def handle_subscription_choice(callback: types.CallbackQuery, state: FSMCo
             currency="RUB",
             prices=[LabeledPrice(label=f"Премиум подписка ({days} дней)", amount=price)],
             start_parameter="premium_subscription",
-            photo_url="https://via.placeholder.com/400x200/6C5CE7/FFFFFF?text=Premium+EvolveAI",
+            photo_url=PAYMENT_PHOTO_URL,
             photo_width=400,
             photo_height=200
         )

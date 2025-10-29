@@ -11,7 +11,7 @@ from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from sqlalchemy.exc import SQLAlchemyError
 from utils.retry_configs import db_retry
-from config import GEMINI_CLIENT, SUMMARY_THRESHOLD, MESSAGES_TO_SUMMARIZE_COUNT
+from config import GEMINI_CLIENT, SUMMARY_THRESHOLD, MESSAGES_TO_SUMMARIZE_COUNT, SUMMARIZER_MODEL_NAME
 from server.database import get_unsummarized_messages, save_summary, delete_summarized_messages, get_profile, create_or_update_profile
 from server.models import ChatHistory, ChatSummary
 from server.relationship_logic import check_for_level_up
@@ -116,9 +116,9 @@ async def generate_summary_and_analyze(user_id: int) -> str | None:
     prompt = JSON_SUMMARY_AND_ANALYSIS_PROMPT.format(chat_history=chat_history_text)
 
     try:
-        # Используем Gemma-3 и убираем response_schema
+        # Используем модель из конфигурации для summarizer
         response = await client.aio.models.generate_content(
-            model="gemma-3-27b-it",
+            model=SUMMARIZER_MODEL_NAME,
             contents=prompt
         )
         

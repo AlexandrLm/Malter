@@ -7,7 +7,7 @@ from google.genai.errors import APIError
 from pydub import AudioSegment
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
-from config import TTS_CLIENT
+from config import TTS_CLIENT, TTS_VOICE_NAME
 from utils.retry_configs import tts_retry
 
 async def create_telegram_voice_message(text_to_speak: str, output_file_object: io.BytesIO) -> bool:
@@ -82,7 +82,7 @@ async def call_tts_api_with_retry(text_to_speak: str) -> Any:
                 speech_config=genai_types.SpeechConfig(
                     voice_config=genai_types.VoiceConfig(
                         prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                            voice_name='leda',
+                            voice_name=TTS_VOICE_NAME,
                         )
                     )
                 ),

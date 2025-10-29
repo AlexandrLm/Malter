@@ -42,11 +42,23 @@ DATABASE_URL = (
 # MODEL_NAME = "gemini-2.5-flash-lite"
 # MODEL_NAME = "gemini-2.5-flash"
 MODEL_NAME = "gemini-flash-latest"
+
+# Модель для summarizer (может отличаться от основной для экономии токенов)
+SUMMARIZER_MODEL_NAME = os.getenv("SUMMARIZER_MODEL_NAME", "gemma-3-27b-it")
+
+# TTS Voice Configuration
+TTS_VOICE_NAME = os.getenv("TTS_VOICE_NAME", "leda")
 # MODEL_NAME = "gemini-2.5-pro"
 
 SUMMARY_THRESHOLD = 26 # Количество сообщений для запуска суммирования
 MESSAGES_TO_SUMMARIZE_COUNT = 20 # Количество сообщений, которые будут взяты для создания сводки (и последующего удаления)
-CHAT_HISTORY_LIMIT = 10 # Количество последних сообщений, которые будут загружены из истории
+
+# Лимиты истории чата для разных типов пользователей
+CHAT_HISTORY_LIMIT_FREE = 5  # FREE пользователи: меньше истории = меньше токенов = меньше затрат
+CHAT_HISTORY_LIMIT_PREMIUM = 12  # PREMIUM пользователи: больше контекста для лучшего общения
+
+# Limits для памяти
+MAX_EMOTIONAL_MEMORIES_PER_USER = int(os.getenv('MAX_EMOTIONAL_MEMORIES_PER_USER', 100))  # Максимум эмоциональных воспоминаний на пользователя
 DAILY_MESSAGE_LIMIT = 50 # Максимальное количество сообщений в день для бесплатных пользователей
 
 # AI Response settings
@@ -166,6 +178,18 @@ if unique_chars < 16:
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60  # Token expires in 1 hour
 
+# Admin Configuration
+ADMIN_USER_IDS_STR = os.getenv('ADMIN_USER_IDS', '')
+ADMIN_USER_IDS = set()
+if ADMIN_USER_IDS_STR:
+    try:
+        ADMIN_USER_IDS = set(map(int, ADMIN_USER_IDS_STR.split(',')))
+        logger.info(f"Загружено {len(ADMIN_USER_IDS)} admin user ID(s)")
+    except ValueError as e:
+        logger.error(f"Ошибка парсинга ADMIN_USER_IDS: {e}")
+else:
+    logger.warning("ADMIN_USER_IDS не установлен. Admin endpoints будут недоступны.")
+
 # Encryption Configuration
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 if not ENCRYPTION_KEY:
@@ -181,3 +205,15 @@ elif ENCRYPTION_KEY == "generate_new_key_for_production":
     )
     if os.getenv('ENVIRONMENT') == 'production':
         raise ValueError("Нельзя использовать дефолтный ENCRYPTION_KEY в production!")
+else:
+    # Валидация формата ENCRYPTION_KEY
+    try:
+        from cryptography.fernet import Fernet
+        Fernet(ENCRYPTION_KEY.encode())
+        logger.info("ENCRYPTION_KEY валиден и успешно загружен")
+    except Exception as e:
+        logger.error(f"❌ ENCRYPTION_KEY имеет неверный формат: {e}")
+        raise ValueError(
+            f"ENCRYPTION_KEY имеет неверный формат Fernet key: {e}\n"
+            "Сгенерируйте новый валидный ключ: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
