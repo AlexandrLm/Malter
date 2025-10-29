@@ -270,17 +270,17 @@ def _handle_background_task_error(task: asyncio.Task, user_id: int) -> None:
 
 add_memory_function = {
     "name": "save_long_term_memory",
-    "description": "Saves a NEW, important fact about the user. Use ONLY when: user explicitly asks to remember, shares new personal info, or corrects existing info. AVOID using for known facts or questions like 'what do you remember?'.",
+    "description": "Сохрани НОВЫЙ факт о пользователе только если: явно просит запомнить, делится новой информацией или исправляет старую. НЕ используй для известных фактов.",
     "parameters": {
         "type": "object",
         "properties": {
             "fact": {
                 "type": "string",
-                "description": "The specific NEW fact to save. Example: 'user likes black coffee'."
+                "description": "Конкретный факт. Пример: 'любит чёрный кофе'"
             },
             "category": {
                 "type": "string",
-                "description": "Category: 'preferences', 'memories', 'work', 'family', 'pets', 'health', 'hobbies'."
+                "description": "Категория: preferences, memories, work, family, pets, health, hobbies"
             }
         },
         "required": ["fact", "category"]
@@ -289,13 +289,13 @@ add_memory_function = {
 
 get_memories_function = {
     "name": "get_long_term_memories",
-    "description": "Searches for specific facts about the user using a query. Use when you need details not in the current context (e.g., user asks 'what do you remember about my job?'). Formulate a query that captures the essence of the question.",
+    "description": "Найди факты о пользователе по запросу. Используй когда информация не в контексте.",
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The search query to find relevant facts. Example: 'user's job' or 'favorite color'."
+                "description": "Поисковый запрос. Пример: 'работа', 'любимый цвет'"
             }
         },
         "required": ["query"]
@@ -304,13 +304,13 @@ get_memories_function = {
 
 generate_image_function = {
     "name": "generate_image",
-    "description": "Generate an image based on a text prompt. Use this tool when the user requests a picture, visualization, diagram, or any creative image to illustrate your response. Only use if it enhances the conversation meaningfully.",
+    "description": "Сгенери изображение по запросу пользователя только если это улучшит диалог.",
     "parameters": {
         "type": "object",
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "A detailed, descriptive prompt for the image generation. Be specific about style, content, and details."
+                "description": "Детальное описание изображения. Будь конкретен со стилем и содержанием."
             }
         },
         "required": ["prompt"]
@@ -319,21 +319,21 @@ generate_image_function = {
 
 remember_emotion_function = {
     "name": "save_emotional_memory",
-    "description": "Сохраняет эмоциональное состояние пользователя с контекстом. Используй когда пользователь выражает СИЛЬНУЮ эмоцию (радость, грусть, гнев, тревогу, волнение). НЕ используй для нейтральных или слабых эмоций. Примеры когда использовать: 'Я так счастлив!', 'Меня это очень расстроило', 'Я невероятно взволнован'. НЕ использовать для: 'все нормально', 'хорошо', 'так себе'.",
+    "description": "Сохрани СИЛЬНУЮ эмоцию (7-10): happy, sad, angry, excited, anxious, proud. НЕ для слабых эмоций.",
     "parameters": {
         "type": "object",
         "properties": {
             "emotion": {
                 "type": "string",
-                "description": "Название эмоции на английском: happy, sad, angry, excited, anxious, frustrated, proud, scared, lonely, grateful"
+                "description": "Эмоция: happy, sad, angry, excited, anxious, frustrated, proud, scared, lonely, grateful"
             },
             "intensity": {
                 "type": "integer",
-                "description": "Интенсивность эмоции от 1 до 10, где 1 - слабая, 5 - средняя, 10 - очень сильная"
+                "description": "Интенсивность 1-10. Сохраняй только если 7+"
             },
             "context": {
                 "type": "string",
-                "description": "Краткий контекст/причина эмоции. Пример: 'получил повышение на работе', 'поссорился с другом'"
+                "description": "Причина эмоции. Пример: 'получил повышение'"
             }
         },
         "required": ["emotion", "intensity", "context"]
@@ -341,46 +341,26 @@ remember_emotion_function = {
 }
 
 def generate_user_prompt(profile: UserProfile) -> str:
-    """
-    Генерирует часть системного промпта с информацией о пользователе.
-    
-    Args:
-        profile (UserProfile): Объект профиля пользователя.
-        
-    Returns:
-        str: Сформированная часть системного промпта с информацией о пользователе.
-    """
+    """Компактный контекст пользователя (оптимизирован для снижения токенов)."""
     level_config = RELATIONSHIP_LEVELS_CONFIG.get(profile.relationship_level)
     relationship_name = level_config.get("name", "Незнакомец")
     relationship_context = level_config.get("prompt_context", "")
     behavioral_rules = level_config.get("behavioral_rules", [])
     forbidden_topics = level_config.get("forbidden_topics", [])
-    relationship_example = level_config.get("example_dialog", "")
-        # Форматируем в строки для промпта
-    rules_str = "\n".join([f"- {rule}" for rule in behavioral_rules])
-    topics_str = ", ".join(forbidden_topics)
 
-    voice_style = ""
-    if profile.is_premium_active:
-        # Dynamic voice style based on relationship level for premium surprise
-        if profile.relationship_level >= 3:  # Intimate levels
-            voice_style = "\nДля близких уровней отношений используй интимный стиль голоса: начинай с 'Say in a whisper:' перед текстом в [VOICE]."
-        elif profile.relationship_level >= 2:  # Friends
-            voice_style = "\nДля дружеских уровней используй энергичный стиль: 'Say excitedly:' в [VOICE]."
-        else:
-            voice_style = "\nДля начальных уровней используй нейтральный стиль: просто текст в [VOICE]."
+    # Компактный формат: максимум информации, минимум текста
+    rules_short = " | ".join(behavioral_rules[:2]) if behavioral_rules else "стандартные"
+    topics_short = ", ".join(forbidden_topics[:2]) if forbidden_topics else "нет"
+
+    voice_hint = ""
+    if profile.is_premium_active and profile.relationship_level >= 2:
+        voice_hint = " [Voice: intimate]" if profile.relationship_level >= 3 else " [Voice: excited]"
 
     return (
-        f"Имя: {profile.name}.\n"
-        f"Гендер: {profile.gender}.\n"
-        f"ВАШИ ТЕКУЩИЕ ОТНОШЕНИЯ:\n"
-        f"## Текущий уровень: {relationship_name}\n"
-        f"## Описание: {relationship_context}\n"
-        f"## Правила поведения на этом уровне:\n{rules_str}\n"
-        f"## Запрещенные темы на этом уровне: {topics_str}\n"
-        f"## Стиль для текущего уровня отношений ({relationship_name})\n"
-        f"  {relationship_example}"
-        f"{voice_style}"
+        f"{profile.name} ({profile.gender}) • Уровень: {relationship_name}\n"
+        f"{relationship_context}\n"
+        f"Правила: {rules_short}\n"
+        f"Избегать: {topics_short}{voice_hint}"
     )
 
 
