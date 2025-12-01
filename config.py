@@ -1,161 +1,177 @@
 import os
 import logging
-from dotenv import load_dotenv
+from typing import Optional, Set
+from pydantic import Field, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-logging.basicConfig(level=getattr(logging, LOG_LEVEL))
+# ============================================================================
+# SETTINGS CLASS
+# ============================================================================
+
+from dotenv import load_dotenv
+load_dotenv('.env', encoding='utf-8')
+
+class Settings(BaseSettings):
+    """
+    Application configuration using Pydantic Settings.
+    Reads from environment variables and .env file.
+    """
+    model_config = SettingsConfigDict(env_file=None, extra='ignore')
+
+    # --- General ---
+    log_level: str = Field("DEBUG", validation_alias="LOG_LEVEL")
+    environment: str = Field("development", validation_alias="ENVIRONMENT")
+
+    # --- Telegram ---
+    telegram_token: str = Field(..., validation_alias="TELEGRAM_BOT_TOKEN")
+    admin_user_ids_str: str = Field("", validation_alias="ADMIN_USER_IDS")
+
+    # --- Payment ---
+    payment_provider_token: Optional[str] = Field(None, validation_alias="PAYMENT_PROVIDER_TOKEN")
+    payment_currency: str = "RUB"
+    payment_photo_url: str = Field("https://via.placeholder.com/400x200/6C5CE7/FFFFFF?text=Premium+EvolveAI", validation_alias="PAYMENT_PHOTO_URL")
+
+    # --- Database ---
+    postgres_user: str = Field("myuser", validation_alias="POSTGRES_USER")
+    postgres_password: str = Field(..., validation_alias="POSTGRES_PASSWORD")
+    db_host: str = Field("db", validation_alias="DB_HOST")
+    postgres_db: str = Field("malterdb", validation_alias="POSTGRES_DB")
+
+    # --- Redis ---
+    redis_host: str = Field("localhost", validation_alias="REDIS_HOST")
+    redis_port: int = Field(6379, validation_alias="REDIS_PORT")
+    redis_db: int = Field(0, validation_alias="REDIS_DB")
+    cache_ttl_seconds: int = Field(600, validation_alias="CACHE_TTL_SECONDS")
+    redis_retry_attempts: int = Field(2, validation_alias="REDIS_RETRY_ATTEMPTS")
+    redis_retry_min_wait: float = Field(0.5, validation_alias="REDIS_RETRY_MIN_WAIT")
+    redis_retry_max_wait: float = Field(2.0, validation_alias="REDIS_RETRY_MAX_WAIT")
+
+    # --- AI / Gemini ---
+    google_api_key: Optional[str] = Field(None, validation_alias="GOOGLE_API_KEY")
+    gemini_model_name: str = "gemini-flash-latest"
+    summarizer_model_name: str = Field("gemma-3-27b-it", validation_alias="SUMMARIZER_MODEL_NAME")
+    tts_voice_name: str = Field("leda", validation_alias="TTS_VOICE_NAME")
+    max_ai_iterations: int = Field(3, validation_alias="MAX_AI_ITERATIONS")
+    ai_thinking_budget: int = Field(0, validation_alias="AI_THINKING_BUDGET")
+    max_image_size_mb: int = Field(10, validation_alias="MAX_IMAGE_SIZE_MB")
+
+    # --- Security ---
+    jwt_secret: str = Field(..., min_length=32, validation_alias="JWT_SECRET")
+    encryption_key: str = Field(..., validation_alias="ENCRYPTION_KEY")
+
+    # --- Application Logic ---
+    api_base_url: str = "http://api:8000"
+    summary_threshold: int = 26
+    messages_to_summarize_count: int = 20
+    chat_history_limit_free: int = 5
+    chat_history_limit_premium: int = 12
+    max_emotional_memories_per_user: int = Field(100, validation_alias="MAX_EMOTIONAL_MEMORIES_PER_USER")
+    daily_message_limit: int = 50
+    subscription_default_duration: int = 30
+    subscription_expiry_check_hours: int = 24
+    typing_speed_cps: int = Field(15, validation_alias="TYPING_SPEED_CPS")
+    min_typing_delay: float = Field(0.5, validation_alias="MIN_TYPING_DELAY")
+    max_typing_delay: float = Field(4.0, validation_alias="MAX_TYPING_DELAY")
+    httpx_timeout: int = Field(180, validation_alias="HTTPX_TIMEOUT")
+    httpx_connect_timeout: int = Field(10, validation_alias="HTTPX_CONNECT_TIMEOUT")
+
+    @computed_field
+    def database_url(self) -> str:
+        return (
+            f"postgresql+asyncpg://"
+            f"{self.postgres_user}:"
+            f"{self.postgres_password}@"
+            f"{self.db_host}:5432/"
+            f"{self.postgres_db}"
+        )
+
+    @computed_field
+    def admin_user_ids(self) -> Set[int]:
+        if not self.admin_user_ids_str:
+            return set()
+        try:
+            return set(map(int, self.admin_user_ids_str.split(',')))
+        except ValueError:
+            return set()
+
+# Initialize Settings
+# This will raise ValidationError if required fields are missing
+try:
+    settings = Settings()
+except Exception as e:
+    print(f"❌ Configuration Error: {e}")
+    raise
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
+logging.basicConfig(level=getattr(logging, settings.log_level))
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# ============================================================================
+# EXPORTED VARIABLES (Backward Compatibility)
+# ============================================================================
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
-PAYMENT_CURRENCY = "RUB"
-PAYMENT_PHOTO_URL = os.getenv("PAYMENT_PHOTO_URL", "https://via.placeholder.com/400x200/6C5CE7/FFFFFF?text=Premium+EvolveAI")
-API_BASE_URL = "http://api:8000"
-POSTGRES_USER = os.getenv('POSTGRES_USER', 'myuser')
-POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD')  # Не задаем значение по умолчанию для безопасности
-DB_HOST = os.getenv('DB_HOST', 'db')
-POSTGRES_DB = os.getenv('POSTGRES_DB', 'malterdb')
+LOG_LEVEL = settings.log_level
+TELEGRAM_TOKEN = settings.telegram_token
+PAYMENT_PROVIDER_TOKEN = settings.payment_provider_token
+PAYMENT_CURRENCY = settings.payment_currency
+PAYMENT_PHOTO_URL = settings.payment_photo_url
+API_BASE_URL = settings.api_base_url
+POSTGRES_USER = settings.postgres_user
+POSTGRES_PASSWORD = settings.postgres_password
+DB_HOST = settings.db_host
+POSTGRES_DB = settings.postgres_db
+DATABASE_URL = settings.database_url
 
-if not POSTGRES_PASSWORD:
-    raise ValueError("Необходимо установить POSTGRES_PASSWORD в .env файле")
+MODEL_NAME = settings.gemini_model_name
+SUMMARIZER_MODEL_NAME = settings.summarizer_model_name
+TTS_VOICE_NAME = settings.tts_voice_name
+SUMMARY_THRESHOLD = settings.summary_threshold
+MESSAGES_TO_SUMMARIZE_COUNT = settings.messages_to_summarize_count
+CHAT_HISTORY_LIMIT_FREE = settings.chat_history_limit_free
+CHAT_HISTORY_LIMIT_PREMIUM = settings.chat_history_limit_premium
+MAX_EMOTIONAL_MEMORIES_PER_USER = settings.max_emotional_memories_per_user
+DAILY_MESSAGE_LIMIT = settings.daily_message_limit
+MAX_AI_ITERATIONS = settings.max_ai_iterations
+AI_THINKING_BUDGET = settings.ai_thinking_budget
+MAX_IMAGE_SIZE_MB = settings.max_image_size_mb
 
-DATABASE_URL = (
-    f"postgresql+asyncpg://"
-    f"{POSTGRES_USER}:"
-    f"{POSTGRES_PASSWORD}@"
-    f"{DB_HOST}:5432/"
-    f"{POSTGRES_DB}"
-)
+CACHE_TTL_SECONDS = settings.cache_ttl_seconds
+REDIS_RETRY_ATTEMPTS = settings.redis_retry_attempts
+REDIS_RETRY_MIN_WAIT = settings.redis_retry_min_wait
+REDIS_RETRY_MAX_WAIT = settings.redis_retry_max_wait
+REDIS_HOST = settings.redis_host
+REDIS_PORT = settings.redis_port
+REDIS_DB = settings.redis_db
 
-MODEL_NAME = "gemini-flash-latest"
-SUMMARIZER_MODEL_NAME = os.getenv("SUMMARIZER_MODEL_NAME", "gemma-3-27b-it")
-TTS_VOICE_NAME = os.getenv("TTS_VOICE_NAME", "leda")
+SUBSCRIPTION_DEFAULT_DURATION = settings.subscription_default_duration
+SUBSCRIPTION_EXPIRY_CHECK_HOURS = settings.subscription_expiry_check_hours
+TYPING_SPEED_CPS = settings.typing_speed_cps
+MIN_TYPING_DELAY = settings.min_typing_delay
+MAX_TYPING_DELAY = settings.max_typing_delay
+HTTPX_TIMEOUT = settings.httpx_timeout
+HTTPX_CONNECT_TIMEOUT = settings.httpx_connect_timeout
 
-SUMMARY_THRESHOLD = 26
-MESSAGES_TO_SUMMARIZE_COUNT = 20
+JWT_SECRET = settings.jwt_secret
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = 60
+ADMIN_USER_IDS = settings.admin_user_ids
+ENCRYPTION_KEY = settings.encryption_key
 
-CHAT_HISTORY_LIMIT_FREE = 5
-CHAT_HISTORY_LIMIT_PREMIUM = 12
+# ============================================================================
+# CLIENT INITIALIZATION
+# ============================================================================
 
-MAX_EMOTIONAL_MEMORIES_PER_USER = int(os.getenv('MAX_EMOTIONAL_MEMORIES_PER_USER', 100))
-DAILY_MESSAGE_LIMIT = 50
-
-MAX_AI_ITERATIONS = int(os.getenv('MAX_AI_ITERATIONS', 3))
-AI_THINKING_BUDGET = int(os.getenv('AI_THINKING_BUDGET', 0))
-MAX_IMAGE_SIZE_MB = int(os.getenv('MAX_IMAGE_SIZE_MB', 10))
-
-CACHE_TTL_SECONDS = int(os.getenv('CACHE_TTL_SECONDS', 600))
-REDIS_RETRY_ATTEMPTS = int(os.getenv('REDIS_RETRY_ATTEMPTS', 2))
-REDIS_RETRY_MIN_WAIT = float(os.getenv('REDIS_RETRY_MIN_WAIT', 0.5))
-REDIS_RETRY_MAX_WAIT = float(os.getenv('REDIS_RETRY_MAX_WAIT', 2.0))
-
-SUBSCRIPTION_DEFAULT_DURATION = 30
-SUBSCRIPTION_EXPIRY_CHECK_HOURS = 24
-
-TYPING_SPEED_CPS = int(os.getenv('TYPING_SPEED_CPS', 15))
-MIN_TYPING_DELAY = float(os.getenv('MIN_TYPING_DELAY', 0.5))
-MAX_TYPING_DELAY = float(os.getenv('MAX_TYPING_DELAY', 4.0))
-
-HTTPX_TIMEOUT = int(os.getenv('HTTPX_TIMEOUT', 180))
-HTTPX_CONNECT_TIMEOUT = int(os.getenv('HTTPX_CONNECT_TIMEOUT', 10))
-
-REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-REDIS_DB = int(os.getenv('REDIS_DB', 0))
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("Необходимо установить TELEGRAM_BOT_TOKEN в .env файле")
-
-if not os.getenv('GOOGLE_API_KEY'):
-    logger.warning("GOOGLE_API_KEY не установлен. AI функции могут не работать.")
-
-if not REDIS_HOST:
-    logger.warning("REDIS_HOST не установлен. Кэширование может не работать.")
-
-GEMINI_CLIENT = None
-TTS_CLIENT = None
-try:
-    from google import genai
-    GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-    if GEMINI_API_KEY:
-        GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
-        TTS_CLIENT = genai.Client(api_key=GEMINI_API_KEY)
-        logger.info("Клиенты Gemini успешно инициализированы.")
-    else:
-        logger.warning("Переменная GOOGLE_API_KEY не установлена. Клиенты Gemini не будут инициализированы.")
-        GEMINI_CLIENT = None
-        TTS_CLIENT = None
-
-except ImportError:
-    logger.info("Модуль 'google.genai' не найден. Клиенты Gemini не будут инициализированы.")
-    GEMINI_CLIENT = None
-    TTS_CLIENT = None
-except Exception as e:
-    logger.error(f"Не удалось инициализировать клиенты Gemini. {e}")
-    GEMINI_CLIENT = None
-    TTS_CLIENT = None
-
-REDIS_CLIENT = None
-REDIS_POOL = None
-try:
-    import redis.asyncio as redis
-
-    REDIS_POOL = redis.ConnectionPool(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        db=REDIS_DB,
-        decode_responses=True,
-        max_connections=50,
-        socket_timeout=5,
-        socket_connect_timeout=5,
-        retry_on_timeout=True,
-        health_check_interval=30
-    )
-
-    REDIS_CLIENT = redis.Redis(connection_pool=REDIS_POOL)
-    logger.info("Redis Client успешно инициализирован (pool_size=50).")
-except ImportError:
-    logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
-except Exception as e:
-    logger.error(f"Не удалось инициализировать Redis Client. {e}")
-
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
-    raise ValueError("JWT_SECRET обязателен для безопасности! Установите его в .env файле.")
-
-if len(JWT_SECRET) < 32:
-    raise ValueError(
-        f"JWT_SECRET слишком короткий ({len(JWT_SECRET)} символов)! Минимум 32 символа.\n"
-        "Сгенерируйте безопасный ключ: openssl rand -hex 32"
-    )
-
+# Security Checks
 unique_chars = len(set(JWT_SECRET))
 if unique_chars < 16:
     logger.warning(f"JWT_SECRET имеет низкую энтропию ({unique_chars} уникальных символов).")
 
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_MINUTES = 60
-
-ADMIN_USER_IDS_STR = os.getenv('ADMIN_USER_IDS', '')
-ADMIN_USER_IDS = set()
-if ADMIN_USER_IDS_STR:
-    try:
-        ADMIN_USER_IDS = set(map(int, ADMIN_USER_IDS_STR.split(',')))
-        logger.info(f"Загружено {len(ADMIN_USER_IDS)} admin user ID(s)")
-    except ValueError as e:
-        logger.error(f"Ошибка парсинга ADMIN_USER_IDS: {e}")
-else:
-    logger.warning("ADMIN_USER_IDS не установлен. Admin endpoints будут недоступны.")
-
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-if not ENCRYPTION_KEY:
-    logger.warning("ENCRYPTION_KEY не установлен! Чувствительные данные будут храниться БЕЗ шифрования.")
-elif ENCRYPTION_KEY == "generate_new_key_for_production":
+if ENCRYPTION_KEY == "generate_new_key_for_production":
     logger.error("❌ ИСПОЛЬЗУЕТСЯ ДЕФОЛТНЫЙ ENCRYPTION_KEY! Это КРИТИЧЕСКАЯ уязвимость безопасности!")
-    if os.getenv('ENVIRONMENT') == 'production':
+    if settings.environment == 'production':
         raise ValueError("Нельзя использовать дефолтный ENCRYPTION_KEY в production!")
 else:
     try:
@@ -165,3 +181,45 @@ else:
     except Exception as e:
         logger.error(f"❌ ENCRYPTION_KEY имеет неверный формат: {e}")
         raise ValueError(f"ENCRYPTION_KEY имеет неверный формат Fernet key: {e}")
+
+# Gemini Client
+GEMINI_CLIENT = None
+TTS_CLIENT = None
+if settings.google_api_key:
+    try:
+        from google import genai
+        GEMINI_CLIENT = genai.Client(api_key=settings.google_api_key)
+        TTS_CLIENT = genai.Client(api_key=settings.google_api_key)
+        logger.info("Клиенты Gemini успешно инициализированы.")
+    except ImportError:
+        logger.info("Модуль 'google.genai' не найден. Клиенты Gemini не будут инициализированы.")
+    except Exception as e:
+        logger.error(f"Не удалось инициализировать клиенты Gemini. {e}")
+else:
+    logger.warning("GOOGLE_API_KEY не установлен. AI функции могут не работать.")
+
+# Redis Client
+REDIS_CLIENT = None
+REDIS_POOL = None
+if settings.redis_host:
+    try:
+        import redis.asyncio as redis
+        REDIS_POOL = redis.ConnectionPool(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            db=settings.redis_db,
+            decode_responses=True,
+            max_connections=50,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30
+        )
+        REDIS_CLIENT = redis.Redis(connection_pool=REDIS_POOL)
+        logger.info("Redis Client успешно инициализирован (pool_size=50).")
+    except ImportError:
+        logger.info("Модуль 'redis' не найден. Redis Client не будет инициализирован.")
+    except Exception as e:
+        logger.error(f"Не удалось инициализировать Redis Client. {e}")
+else:
+    logger.warning("REDIS_HOST не установлен. Кэширование может не работать.")

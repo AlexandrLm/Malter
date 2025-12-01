@@ -15,7 +15,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 import config
 from server.database import get_profile, check_message_limit
-from server.tts import create_telegram_voice_message
+try:
+    from server.tts import create_telegram_voice_message
+except ImportError:
+    logging.warning("TTS module could not be imported (likely due to missing audioop). TTS disabled.")
+    async def create_telegram_voice_message(text, file_obj):
+        return False
 
 security = HTTPBearer()
 SECRET_KEY = config.JWT_SECRET

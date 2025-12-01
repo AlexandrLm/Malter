@@ -1,10 +1,15 @@
+import logging
 import os
 import asyncio
 import io
 from typing import Any
 from google.genai import types as genai_types
 from google.genai.errors import APIError
-from pydub import AudioSegment
+try:
+    from pydub import AudioSegment
+except ImportError:
+    AudioSegment = None
+    logging.warning("Pydub could not be imported (likely due to missing audioop). TTS will be disabled.")
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
 from config import TTS_CLIENT, TTS_VOICE_NAME

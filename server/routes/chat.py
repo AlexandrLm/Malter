@@ -6,6 +6,7 @@ Message processing and chat history endpoints.
 import logging
 import time
 from fastapi import APIRouter, HTTPException, Request, Depends
+from google import genai
 from slowapi import Limiter
 from prometheus_client import Counter, Histogram
 
@@ -18,6 +19,7 @@ from server.api_helpers import (
 )
 from server.database import get_unsummarized_messages
 from server.ai import generate_ai_response
+from server.dependencies import get_gemini_client
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 limiter = Limiter(key_func=get_limiter_key)
@@ -40,7 +42,8 @@ VOICE_MESSAGES_GENERATED = Counter('voice_messages_generated_total', 'Total numb
 async def chat_handler(
     request: Request,
     chat: ChatRequest,
-    user_id: int = Depends(verify_token)
+    user_id: int = Depends(verify_token),
+    gemini_client: genai.Client = Depends(get_gemini_client)
 ):
     """
     Process incoming user message and generate AI response.
@@ -75,9 +78,9 @@ async def chat_handler(
         ai_start_time = time.time()
         ai_response = await generate_ai_response(
             user_id=user_id,
-            user_message=chat.message,
-            timestamp=chat.timestamp,
-            image_data=chat.image_data
+            message=chat.message,
+            image_data=chat.image_data,
+            gemini_client=gemini_client
         )
         AI_RESPONSE_DURATION.observe(time.time() - ai_start_time)
 
